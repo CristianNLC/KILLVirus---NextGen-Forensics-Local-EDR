@@ -1,0 +1,10 @@
+
+=== REPORTE ESCANEO [2026-09-12 23:41:37] ===
+AMENAZA: prueba.bat | Hash: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 | Malware: Empty-File-Alert | Cuarentena: C:\wamp64\www\Proyecto_Antivirus\cuarentena\prueba.bat_20260912_234136.quarantine
+Resumen: Escaneo finalizado: 2 analizados, 1 amenazas aisladas.
+============================================================
+
+=== REPORTE ESCANEO [2026-09-12 23:45:09] ===
+AMENAZA: downloader_falso.ps1 | Método: Heurística: HEUR.PS.Downloader | Detalle: Descarga de archivos sospechosa mediante PowerShell | Cuarentena: C:\wamp64\www\Proyecto_Antivirus\cuarentena\downloader_falso.ps1_20260912_234509.quarantine
+Resumen: Escaneo finalizado: 2 analizados, 1 amenazas aisladas.
+============================================================

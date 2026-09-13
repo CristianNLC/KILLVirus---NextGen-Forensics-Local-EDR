@@ -1,0 +1,18 @@
+# Compilación y ejecutables temporales
+build/
+dist/
+dist_installer/
+*.spec
+
+# Entornos virtuales y dependencias
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Archivos de cuarentena y reportes locales
+cuarentena/
+reportes/
+
+# Claves locales y configuraciones personales
+data/config.json

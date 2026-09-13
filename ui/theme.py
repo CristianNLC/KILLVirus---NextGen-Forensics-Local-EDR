@@ -1,0 +1,23 @@
+"""Constantes de estilo y paleta de colores para la interfaz gráfica."""
+
+COLOR_BG_DARK = "#121316"
+COLOR_SIDEBAR = "#1a1c23"
+COLOR_CARD = "#21242d"
+COLOR_CARD_HOVER = "#2a2e39"
+
+COLOR_ACCENT = "#2563eb"
+COLOR_ACCENT_HOVER = "#1d4ed8"
+
+COLOR_DANGER = "#dc2626"
+COLOR_DANGER_HOVER = "#b91c1c"
+
+COLOR_SUCCESS = "#16a34a"
+COLOR_SUCCESS_HOVER = "#15803d"
+
+COLOR_WARNING = "#d97706"
+
+COLOR_TEXT_PRIMARY = "#f3f4f6"
+COLOR_TEXT_SECONDARY = "#9ca3af"
+COLOR_TEXT_MUTED = "#6b7280"
+
+FONT_FAMILY = "Segoe UI"
