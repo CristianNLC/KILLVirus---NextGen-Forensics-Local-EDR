@@ -1,45 +1,54 @@
 <?php
 // C:\wamp64\www\Proyecto_Antivirus\billing\create_preference.php
 
-function load_env_php($env_path) {
-    if (file_exists($env_path)) {
-        $lines = file($env_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if ($line === '' || strpos($line, '#') === 0) continue;
-            if (strpos($line, '=') !== false) {
-                list($key, $val) = explode('=', $line, 2);
-                $key = trim($key);
-                $val = trim(trim($val), '"\'');
-                if (!getenv($key)) {
-                    putenv("{$key}={$val}");
-                    $_ENV[$key] = $val;
-                }
-            }
+function load_env_php() {
+    $envPath = __DIR__ . '/../.env';
+    if (!file_exists($envPath)) {
+        return [];
+    }
+    $lines = file($envPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    $env = [];
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '' || str_starts_with($line, '#')) continue;
+        if (str_contains($line, '=')) {
+            list($name, $value) = explode('=', $line, 2);
+            $name = trim($name);
+            $value = trim($value, " \t\n\r\0\x0B\"'");
+            putenv("{$name}={$value}");
+            $_ENV[$name] = $value;
+            $env[$name] = $value;
         }
     }
+    return $env;
 }
 
-load_env_php(__DIR__ . '/../.env');
+load_env_php();
 
 $mp_access_token = getenv('MP_ACCESS_TOKEN') ?: ($_ENV['MP_ACCESS_TOKEN'] ?? '');
 
-$preference_data = [
-    "items" => [
-        [
-            "title"       => "KILLVirus PRO - Licencia Anual (1 PC)",
-            "quantity"    => 1,
-            "unit_price"  => 15000, // Precio en moneda local
-            "currency_id" => "ARS"
+if (empty($mp_access_token)) {
+    die("Error: No se encontró el MP_ACCESS_TOKEN en el archivo .env");
+}
+
+// 1. Configurar la preferencia de pago
+// 1. Configurar la preferencia de pago
+    $preference_data = [
+        "items" => [
+            [
+                "title"       => "KILLVirus PRO - Licencia Anual (1 PC)",
+                "quantity"    => 1,
+                "unit_price"  => 15000,
+                "currency_id" => "ARS"
+            ]
+        ],
+        "back_urls" => [
+            "success" => "http://localhost/Proyecto_Antivirus/billing/success.php",
+            "failure" => "http://localhost/Proyecto_Antivirus/billing/failure.php",
+            "pending" => "http://localhost/Proyecto_Antivirus/billing/pending.php"
         ]
-    ],
-    "back_urls" => [
-        "success" => "http://localhost/Proyecto_Antivirus/billing/success.php",
-        "failure" => "http://localhost/Proyecto_Antivirus/billing/failure.php"
-    ],
-    "auto_return" => "approved",
-    "notification_url" => "https://TU-DOMINIO-O-NGROK/Proyecto_Antivirus/billing/webhook_mp.php"
-];
+        // Se omite "auto_return" en localhost para evitar el rechazo de la API
+    ];
 
 $ch = curl_init("https://api.mercadopago.com/checkout/preferences");
 curl_setopt($ch, CURLOPT_POST, true);
@@ -49,14 +58,18 @@ curl_setopt($ch, CURLOPT_HTTPHEADER, [
     "Content-Type: application/json"
 ]);
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // Evita fallos de certificados SSL en local
 $response = curl_exec($ch);
 curl_close($ch);
 
 $data = json_decode($response, true);
 
-// Devuelve la URL a la que debes redirigir al usuario para pagar
 if (isset($data['init_point'])) {
-    echo "Enlace de pago: " . $data['init_point'];
+    header("Location: " . $data['init_point']);
+    exit;
 } else {
-    echo "Error al crear preferencia: " . $response;
+    echo "<h3>Error al crear preferencia:</h3>";
+    echo "<pre>";
+    print_r($response);
+    echo "</pre>";
 }
