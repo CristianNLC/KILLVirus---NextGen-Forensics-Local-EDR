@@ -1,13 +1,14 @@
-; Script de Inno Setup para KILLVirus
+; Script de Inno Setup para KILLVirus v2.0
 [Setup]
 AppId={{E1B92C34-89C1-4D52-B42E-89C41C8F9A22}
-AppName=KILLVirus
-AppVersion=1.0
+AppName=KILLVirus PRO
+AppVersion=2.0
 AppPublisher=KILLVirus Security
+AppPublisherURL=https://github.com/
 DefaultDirName={autopf}\KILLVirus
 DefaultGroupName=KILLVirus
 OutputDir=dist_installer
-OutputBaseFilename=KILLVirus_Setup
+OutputBaseFilename=KILLVirus_v2_Setup
 SetupIconFile=assets\icon.ico
 Compression=lzma
 SolidCompression=yes
@@ -21,16 +22,16 @@ Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-; Binario compilado
-Source: "dist\KILLVirus.exe"; DestDir: "{app}"; Flags: ignoreversion
-; Carpetas de soporte
+; Binario compilado con PyInstaller
+Source: "dist\KILLVirus_v2.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Carpetas de soporte requeridas en ejecución
 Source: "data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\KILLVirus"; Filename: "{app}\KILLVirus.exe"; IconFilename: "{app}\assets\icon.ico"
+Name: "{group}\KILLVirus PRO"; Filename: "{app}\KILLVirus_v2.exe"; IconFilename: "{app}\assets\icon.ico"
 Name: "{group}\Desinstalar KILLVirus"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\KILLVirus"; Filename: "{app}\KILLVirus.exe"; Tasks: desktopicon; IconFilename: "{app}\assets\icon.ico"
+Name: "{autodesktop}\KILLVirus PRO"; Filename: "{app}\KILLVirus_v2.exe"; Tasks: desktopicon; IconFilename: "{app}\assets\icon.ico"
 
 [Run]
-Filename: "{app}\KILLVirus.exe"; Description: "{cm:LaunchProgram,KILLVirus}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\KILLVirus_v2.exe"; Description: "{cm:LaunchProgram,KILLVirus PRO}"; Flags: nowait postinstall skipifsilent

@@ -2,16 +2,26 @@ import os
 import psutil
 from core.scanner import calculate_sha256
 
-def scan_running_processes(signatures):
+def scan_running_processes(signatures, progress_callback=None):
     inspected = 0
     threats_found = []
 
-    for proc in psutil.process_iter(['pid', 'name', 'exe']):
+    try:
+        procs = list(psutil.process_iter(['pid', 'name', 'exe']))
+    except Exception:
+        procs = []
+
+    total_procs = len(procs)
+
+    for idx, proc in enumerate(procs, 1):
         try:
             p_info = proc.info
-            exe_path = p_info['exe']
-            p_name = p_info['name']
-            pid = p_info['pid']
+            exe_path = p_info.get('exe', '')
+            p_name = p_info.get('name', '')
+            pid = p_info.get('pid', 0)
+
+            if progress_callback:
+                progress_callback(idx, total_procs, exe_path or p_name)
 
             if not exe_path or not os.path.isfile(exe_path):
                 continue

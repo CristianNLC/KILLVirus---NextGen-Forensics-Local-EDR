@@ -1,19 +1,24 @@
 import os
 import sys
 import json
+import time
 import shutil
 import threading
 from datetime import datetime
 import customtkinter as ctk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, simpledialog, ttk
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 from ui.theme import (
-    COLOR_BG_DARK, COLOR_SIDEBAR, COLOR_CARD, COLOR_CARD_HOVER,
+    COLOR_BG, COLOR_SIDEBAR, COLOR_CARD, COLOR_CARD_HOVER,
     COLOR_ACCENT, COLOR_ACCENT_HOVER, COLOR_DANGER, COLOR_DANGER_HOVER,
-    COLOR_SUCCESS, COLOR_SUCCESS_HOVER, COLOR_WARNING,
+    COLOR_SUCCESS, COLOR_SUCCESS_HOVER, COLOR_WARNING, COLOR_GOLD,
     COLOR_TEXT_PRIMARY, COLOR_TEXT_SECONDARY, COLOR_TEXT_MUTED, FONT_FAMILY
+)
+from ui.components import (
+    HelpModal, ProUpgradeModal, ProgressCard,
+    show_alert, ask_confirm, QuarantineDetailModal, format_quarantine_date
 )
 
 from core.scanner import (
@@ -28,6 +33,7 @@ from core.updater import update_signatures_from_cloud
 from core.reporter import generate_html_report
 from core.tray import SystemTrayManager
 from core.context_menu import register_context_menu, unregister_context_menu
+from core.licensing import get_saved_license, verify_license_online
 
 SIGNATURES_FILE = os.path.join("data", "signatures.json")
 CONFIG_FILE = os.path.join("data", "config.json")
@@ -48,7 +54,6 @@ class LiveProtectionHandler(FileSystemEventHandler):
             self.process_file(event.src_path)
 
     def process_file(self, filepath):
-        import time
         now = time.time()
         if filepath in self.last_scanned and (now - self.last_scanned[filepath]) < 1.5:
             return
@@ -64,13 +69,19 @@ class MainWindow(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        ctk.set_appearance_mode("Dark")
-        self.title("KILLVirus - NextGen Forensics & EDR")
-        self.geometry("1080x700")
-        self.minsize(980, 620)
-        self.configure(fg_color=COLOR_BG_DARK)
+        self.config = self.load_config()
+        appearance = self.config.get("appearance_mode", "Oscuro")
+        ctk.set_appearance_mode("Dark" if appearance == "Oscuro" else "Light")
 
-        # Vincular icono oficial en la ventana
+        self.geometry("1100x720")
+        self.minsize(980, 640)
+        self.configure(fg_color=COLOR_BG)
+
+        self.is_pro = False
+        self.license_info = None
+        self.check_initial_license()
+
+        # Icono de aplicación
         icon_path = os.path.join("assets", "icon.ico")
         if os.path.exists(icon_path):
             try:
@@ -79,10 +90,9 @@ class MainWindow(ctk.CTk):
                 pass
 
         self.signatures = self.load_signatures()
-        self.config = self.load_config()
         self.vt_api_key = self.config.get("vt_api_key", "")
         self.exclusions = set(self.config.get("exclusions", []))
-        
+
         self.observer = None
         self.is_monitoring = False
         self.tray = None
@@ -105,27 +115,75 @@ class MainWindow(ctk.CTk):
         self.grid_rowconfigure(0, weight=1)
 
         # ---------------- BARRA LATERAL (SIDEBAR) ----------------
-        self.sidebar = ctk.CTkFrame(self, width=230, corner_radius=0, fg_color=COLOR_SIDEBAR)
+        self.sidebar = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=COLOR_SIDEBAR)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(5, weight=1)
+        self.sidebar.grid_rowconfigure(6, weight=1)
 
         brand_lbl = ctk.CTkLabel(
             self.sidebar, text="⚔️ KILLVirus",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=20, weight="bold"),
-            text_color="#eab308"
+            font=ctk.CTkFont(family=FONT_FAMILY, size=22, weight="bold"),
+            text_color=COLOR_GOLD
         )
-        brand_lbl.grid(row=0, column=0, padx=20, pady=(24, 20), sticky="w")
+        brand_lbl.grid(row=0, column=0, padx=20, pady=(24, 16), sticky="w")
 
         self.btn_nav_scanner = self._create_sidebar_btn("Análisis de Amenazas", 1, self.show_scanner_view)
         self.btn_nav_tools = self._create_sidebar_btn("Motores del Sistema", 2, self.show_tools_view)
         self.btn_nav_quar = self._create_sidebar_btn("Cuarentena", 3, self.show_quarantine_view)
         self.btn_nav_config = self._create_sidebar_btn("Configuración", 4, self.show_config_view)
 
+        # Botón de Ayuda (?)
+        self.btn_help = ctk.CTkButton(
+            self.sidebar, text="❓ Guía de Uso (?)", height=36, corner_radius=8,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            fg_color=COLOR_CARD, hover_color=COLOR_CARD_HOVER,
+            text_color=COLOR_TEXT_PRIMARY, anchor="w",
+            command=self.open_help_modal
+        )
+        self.btn_help.grid(row=5, column=0, padx=12, pady=(12, 4), sticky="ew")
+
+        # Selector de Tema (Modo Oscuro / Claro)
+        theme_box = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        theme_box.grid(row=7, column=0, padx=16, pady=(0, 10), sticky="ew")
+
+        lbl_theme = ctk.CTkLabel(
+            theme_box, text="Tema:",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12), text_color=COLOR_TEXT_SECONDARY
+        )
+        lbl_theme.pack(side="left", padx=(0, 8))
+
+        saved_mode = self.config.get("appearance_mode", "Oscuro")
+        self.opt_theme = ctk.CTkOptionMenu(
+            theme_box, values=["Oscuro", "Claro"], height=28, width=110,
+            command=self.change_appearance_mode_event,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12)
+        )
+        self.opt_theme.set(saved_mode)
+        self.opt_theme.pack(side="right")
+
+        # Insignia de Licencia y Botón PRO
+        badge_text = "★ KILLVirus PRO" if self.is_pro else "KILLVirus Gratuito"
+        badge_color = COLOR_SUCCESS if self.is_pro else COLOR_TEXT_MUTED
+        self.lbl_license_badge = ctk.CTkLabel(
+            self.sidebar, text=badge_text,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            text_color=badge_color
+        )
+        self.lbl_license_badge.grid(row=8, column=0, padx=20, pady=(4, 4), sticky="w")
+
+        self.btn_activate = ctk.CTkButton(
+            self.sidebar, text="⭐ Obtener Licencia PRO", height=34, corner_radius=6,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
+            command=self.open_pro_upgrade_dialog
+        )
+        if not self.is_pro:
+            self.btn_activate.grid(row=9, column=0, padx=16, pady=(0, 10), sticky="ew")
+
         self.lbl_sig_count = ctk.CTkLabel(
-            self.sidebar, text=f"Firmas: {len(self.signatures)}",
+            self.sidebar, text=f"Firmas CTI: {len(self.signatures)}",
             font=ctk.CTkFont(family=FONT_FAMILY, size=11), text_color=COLOR_TEXT_MUTED
         )
-        self.lbl_sig_count.grid(row=6, column=0, padx=20, pady=(0, 16), sticky="w")
+        self.lbl_sig_count.grid(row=10, column=0, padx=20, pady=(0, 16), sticky="w")
 
         # ---------------- CONTENEDOR PRINCIPAL ----------------
         self.container = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -146,7 +204,7 @@ class MainWindow(ctk.CTk):
             self.sidebar, text=text, height=40, corner_radius=8,
             font=ctk.CTkFont(family=FONT_FAMILY, size=13),
             fg_color="transparent", hover_color=COLOR_CARD,
-            anchor="w", command=cmd
+            text_color=COLOR_TEXT_PRIMARY, anchor="w", command=cmd
         )
         btn.grid(row=row, column=0, padx=12, pady=4, sticky="ew")
         return btn
@@ -154,19 +212,20 @@ class MainWindow(ctk.CTk):
     def _set_active_tab(self, active_btn):
         for btn in [self.btn_nav_scanner, self.btn_nav_tools, self.btn_nav_quar, self.btn_nav_config]:
             btn.configure(fg_color=COLOR_ACCENT if btn == active_btn else "transparent")
+            btn.configure(text_color="#ffffff" if btn == active_btn else COLOR_TEXT_PRIMARY)
 
     # ================= VISTA 1: ESCÁNER =================
     def _init_scanner_view(self):
         v = ctk.CTkFrame(self.container, fg_color="transparent")
         v.grid_columnconfigure(0, weight=1)
-        v.grid_rowconfigure(2, weight=1)
+        v.grid_rowconfigure(3, weight=1)
 
         # Tarjeta de Entrada
         input_card = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
         input_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         input_card.grid_columnconfigure(0, weight=1)
 
-        lbl = ctk.CTkLabel(input_card, text="Ruta a Inspeccionar / Supervisar", font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"))
+        lbl = ctk.CTkLabel(input_card, text="Ruta a Inspeccionar / Supervisar", font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"), text_color=COLOR_TEXT_PRIMARY)
         lbl.grid(row=0, column=0, columnspan=3, padx=16, pady=(12, 4), sticky="w")
 
         self.entry_path = ctk.CTkEntry(input_card, placeholder_text="Seleccione un archivo o carpeta objetivo...", height=36)
@@ -183,15 +242,20 @@ class MainWindow(ctk.CTk):
         self.btn_scan = ctk.CTkButton(actions, text="Iniciar Escaneo de Disco", height=42, fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, command=self.start_scan_thread)
         self.btn_scan.grid(row=0, column=0, padx=(0, 8), sticky="ew")
 
-        self.btn_live = ctk.CTkButton(actions, text="Protección en Tiempo Real: Inactiva", height=42, fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_HOVER, command=self.toggle_live_protection)
+        live_text = "Protección en Tiempo Real 🔒 PRO" if not self.is_pro else "Protección en Tiempo Real: Inactiva"
+        self.btn_live = ctk.CTkButton(actions, text=live_text, height=42, fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_HOVER, command=self.toggle_live_protection)
         self.btn_live.grid(row=0, column=1, padx=4, sticky="ew")
 
-        self.btn_vt = ctk.CTkButton(actions, text="Consultar VirusTotal", height=42, fg_color=COLOR_CARD, hover_color=COLOR_CARD_HOVER, command=self.start_vt_thread)
+        self.btn_vt = ctk.CTkButton(actions, text="Consultar VirusTotal", height=42, fg_color=COLOR_CARD, hover_color=COLOR_CARD_HOVER, text_color=COLOR_TEXT_PRIMARY, command=self.start_vt_thread)
         self.btn_vt.grid(row=0, column=2, padx=(8, 0), sticky="ew")
 
-        # Tarjeta Consola de Eventos
+        # Tarjeta de Progreso con ETA y Archivo Actual Dinámico
+        self.progress_card = ProgressCard(v)
+        self.progress_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+
+        # Consola de Eventos Profesional (Solo Detecciones)
         log_card = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
-        log_card.grid(row=2, column=0, sticky="nsew")
+        log_card.grid(row=3, column=0, sticky="nsew")
         log_card.grid_rowconfigure(0, weight=1)
         log_card.grid_columnconfigure(0, weight=1)
 
@@ -200,7 +264,7 @@ class MainWindow(ctk.CTk):
         self.log_textbox.configure(state="disabled")
 
         self.lbl_status = ctk.CTkLabel(v, text="Sistema listo para operar.", anchor="w", font=ctk.CTkFont(family=FONT_FAMILY, size=11), text_color=COLOR_TEXT_SECONDARY)
-        self.lbl_status.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        self.lbl_status.grid(row=4, column=0, sticky="ew", pady=(6, 0))
 
         self.views["scanner"] = v
 
@@ -209,37 +273,39 @@ class MainWindow(ctk.CTk):
         v = ctk.CTkFrame(self.container, fg_color="transparent")
         v.grid_columnconfigure((0, 1), weight=1)
 
-        # RAM
+        # RAM (PRO)
         card_ram = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
         card_ram.grid(row=0, column=0, padx=(0, 10), pady=(0, 12), sticky="nsew")
-        ctk.CTkLabel(card_ram, text="Inspección de Procesos (RAM)", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold")).pack(anchor="w", padx=16, pady=(16, 6))
+        
+        lbl_ram_h = ctk.CTkLabel(card_ram, text="Inspección de Procesos RAM 🔒 PRO", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY)
+        lbl_ram_h.pack(anchor="w", padx=16, pady=(16, 6))
         ctk.CTkLabel(card_ram, text="Examina los binarios cargados en memoria y neutraliza procesos maliciosos activos.", wraplength=340, justify="left", text_color=COLOR_TEXT_SECONDARY).pack(anchor="w", padx=16, pady=(0, 14))
         ctk.CTkButton(card_ram, text="Escanear Memoria RAM", command=self.start_procs_thread).pack(anchor="w", padx=16, pady=(0, 16))
 
-        # Persistencia
+        # Persistencia (PRO)
         card_pers = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
         card_pers.grid(row=0, column=1, padx=(10, 0), pady=(0, 12), sticky="nsew")
-        ctk.CTkLabel(card_pers, text="Auditoría de Registro (Persistencia)", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold")).pack(anchor="w", padx=16, pady=(16, 6))
+        ctk.CTkLabel(card_pers, text="Auditoría de Registro (Persistencia) 🔒 PRO", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(16, 6))
         ctk.CTkLabel(card_pers, text="Verifica claves Run/RunOnce y valida certificados Authenticode de cada programa al inicio.", wraplength=340, justify="left", text_color=COLOR_TEXT_SECONDARY).pack(anchor="w", padx=16, pady=(0, 14))
         ctk.CTkButton(card_pers, text="Auditar Registro de Windows", command=self.start_persistence_thread).pack(anchor="w", padx=16, pady=(0, 16))
 
         # ThreatFox CTI
         card_upd = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
         card_upd.grid(row=1, column=0, padx=(0, 10), pady=(0, 12), sticky="nsew")
-        ctk.CTkLabel(card_upd, text="Actualizador de Firmas CTI", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold")).pack(anchor="w", padx=16, pady=(16, 6))
+        ctk.CTkLabel(card_upd, text="Actualizador de Firmas CTI", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(16, 6))
         ctk.CTkLabel(card_upd, text="Descarga el volcado más reciente de hashes maliciosos SHA-256 desde el feed de ThreatFox.", wraplength=340, justify="left", text_color=COLOR_TEXT_SECONDARY).pack(anchor="w", padx=16, pady=(0, 14))
         ctk.CTkButton(card_upd, text="Actualizar Base de Datos", fg_color=COLOR_SUCCESS, hover_color=COLOR_SUCCESS_HOVER, command=self.start_update_thread).pack(anchor="w", padx=16, pady=(0, 16))
 
         # Menú Contextual de Windows
         card_ctx = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
         card_ctx.grid(row=1, column=1, padx=(10, 0), pady=(0, 12), sticky="nsew")
-        ctk.CTkLabel(card_ctx, text="Integración Shell de Windows", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold")).pack(anchor="w", padx=16, pady=(16, 6))
+        ctk.CTkLabel(card_ctx, text="Integración Shell de Windows", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(16, 6))
         ctk.CTkLabel(card_ctx, text="Añade o remueve la opción de clic derecho en el Explorador de archivos de Windows.", wraplength=340, justify="left", text_color=COLOR_TEXT_SECONDARY).pack(anchor="w", padx=16, pady=(0, 14))
         ctk.CTkButton(card_ctx, text="Configurar Clic Derecho", command=self.manage_context_menu).pack(anchor="w", padx=16, pady=(0, 16))
 
         self.views["tools"] = v
 
-    # ================= VISTA 3: CUARENTENA =================
+    # ================= VISTA 3: CUARENTENA MEJORADA (SELECCIÓN MÚLTIPLE) =================
     def _init_quarantine_view(self):
         v = ctk.CTkFrame(self.container, fg_color="transparent")
         v.grid_columnconfigure(0, weight=1)
@@ -247,7 +313,7 @@ class MainWindow(ctk.CTk):
 
         top = ctk.CTkFrame(v, fg_color="transparent")
         top.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ctk.CTkLabel(top, text="Elementos Aislados en Cuarentena", font=ctk.CTkFont(family=FONT_FAMILY, size=15, weight="bold")).pack(side="left")
+        ctk.CTkLabel(top, text="Elementos Aislados en Cuarentena", font=ctk.CTkFont(family=FONT_FAMILY, size=15, weight="bold"), text_color=COLOR_TEXT_PRIMARY).pack(side="left")
         ctk.CTkButton(top, text="Refrescar Lista", width=120, command=self.refresh_quarantine_table).pack(side="right")
 
         table_frame = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
@@ -256,19 +322,41 @@ class MainWindow(ctk.CTk):
         table_frame.grid_rowconfigure(0, weight=1)
 
         cols = ("archivo", "tamano", "fecha")
-        self.tree_quar = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
+        # Configuración con selectmode="extended" para permitir selección múltiple nativa (Ctrl+Clic / Shift+Clic)
+        self.tree_quar = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="extended")
         self.tree_quar.heading("archivo", text="Archivo Aislado")
         self.tree_quar.heading("tamano", text="Tamaño")
         self.tree_quar.heading("fecha", text="Fecha de Aislamiento")
-        self.tree_quar.column("archivo", width=420)
-        self.tree_quar.column("tamano", width=100, anchor="center")
-        self.tree_quar.column("fecha", width=180, anchor="center")
+        self.tree_quar.column("archivo", width=380)
+        self.tree_quar.column("tamano", width=110, anchor="center")
+        self.tree_quar.column("fecha", width=190, anchor="center")
         self.tree_quar.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
 
         btn_bar = ctk.CTkFrame(v, fg_color="transparent")
         btn_bar.grid(row=2, column=0, sticky="ew", pady=(12, 0))
-        ctk.CTkButton(btn_bar, text="Restaurar a Destino Original", fg_color=COLOR_SUCCESS, hover_color=COLOR_SUCCESS_HOVER, command=self.restore_quarantined_file).pack(side="left", padx=(0, 10))
-        ctk.CTkButton(btn_bar, text="Eliminar de Forma Permanente", fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_HOVER, command=self.delete_quarantined_file).pack(side="left")
+
+        # Botones de acción en lote
+        ctk.CTkButton(
+            btn_bar, text="Seleccionar Todo", width=130,
+            fg_color=COLOR_CARD, hover_color=COLOR_CARD_HOVER, text_color=COLOR_TEXT_PRIMARY,
+            command=self.select_all_quarantine
+        ).pack(side="left", padx=(0, 10))
+
+        ctk.CTkButton(
+            btn_bar, text="🔍 Ver Detalle", width=110,
+            fg_color=COLOR_CARD, hover_color=COLOR_CARD_HOVER, text_color=COLOR_TEXT_PRIMARY,
+            command=self.show_quarantine_detail
+        ).pack(side="left", padx=(0, 10))
+
+        ctk.CTkButton(
+            btn_bar, text="Restaurar Seleccionados", fg_color=COLOR_SUCCESS, hover_color=COLOR_SUCCESS_HOVER,
+            command=self.restore_selected_quarantine
+        ).pack(side="left", padx=(0, 10))
+
+        ctk.CTkButton(
+            btn_bar, text="Eliminar Seleccionados", fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_HOVER,
+            command=self.delete_selected_quarantine
+        ).pack(side="left")
 
         self.views["quarantine"] = v
 
@@ -280,8 +368,8 @@ class MainWindow(ctk.CTk):
         # VirusTotal
         card_vt = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
         card_vt.grid(row=0, column=0, sticky="ew", pady=(0, 16))
-        ctk.CTkLabel(card_vt, text="Credenciales de VirusTotal API", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold")).pack(anchor="w", padx=16, pady=(16, 6))
-        
+        ctk.CTkLabel(card_vt, text="Credenciales de VirusTotal API", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(16, 6))
+
         box_api = ctk.CTkFrame(card_vt, fg_color="transparent")
         box_api.pack(fill="x", padx=16, pady=(0, 16))
         self.entry_vt_key = ctk.CTkEntry(box_api, height=36, show="*")
@@ -292,7 +380,7 @@ class MainWindow(ctk.CTk):
         # Whitelist / Exclusiones
         card_ex = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
         card_ex.grid(row=1, column=0, sticky="ew")
-        ctk.CTkLabel(card_ex, text="Lista Blanca / Exclusiones", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold")).pack(anchor="w", padx=16, pady=(16, 6))
+        ctk.CTkLabel(card_ex, text="Lista Blanca / Exclusiones", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(16, 6))
         ctk.CTkLabel(card_ex, text="Las carpetas o rutas especificadas serán ignoradas en todos los escaneos.", text_color=COLOR_TEXT_SECONDARY).pack(anchor="w", padx=16, pady=(0, 10))
 
         self.txt_exclusions = ctk.CTkTextbox(card_ex, height=130, font=ctk.CTkFont(family="Consolas", size=12))
@@ -306,7 +394,7 @@ class MainWindow(ctk.CTk):
 
         self.views["config"] = v
 
-    # ================= NAVEGACIÓN =================
+    # ================= NAVEGACIÓN Y EVENTOS =================
     def show_scanner_view(self):
         self._switch_view("scanner", self.btn_nav_scanner)
 
@@ -328,15 +416,75 @@ class MainWindow(ctk.CTk):
                 frame.grid_forget()
         self._set_active_tab(nav_button)
 
+    def open_help_modal(self):
+        HelpModal(self)
+
+    def open_pro_upgrade_dialog(self, feature_name="KILLVirus PRO"):
+        ProUpgradeModal(self, feature_name=feature_name, on_activate_callback=self.activate_with_key)
+
+    def change_appearance_mode_event(self, new_mode_str: str):
+        mode = "Dark" if new_mode_str == "Oscuro" else "Light"
+        ctk.set_appearance_mode(mode)
+        self.config["appearance_mode"] = new_mode_str
+        self.save_config()
+
+    # ================= LICENCIAMIENTO Y CONTROL DE ACCESO =================
+    def check_initial_license(self):
+        saved = get_saved_license()
+        if saved and saved.get("clave"):
+            ok, msg, data = verify_license_online(saved["clave"])
+            if ok:
+                self.is_pro = True
+                self.license_info = data or saved
+                self.title("KILLVirus PRO - Edición Profesional")
+                return
+        self.is_pro = False
+        self.license_info = None
+        self.title("KILLVirus Community - (Versión Gratuita)")
+
+    def activate_with_key(self, key: str):
+        self.set_status("Validando clave de licencia...")
+        ok, msg, data = verify_license_online(key)
+        if ok:
+            self.is_pro = True
+            self.license_info = data
+            self.title("KILLVirus PRO - Edición Profesional")
+            if hasattr(self, "lbl_license_badge"):
+                self.lbl_license_badge.configure(text="★ KILLVirus PRO", text_color=COLOR_SUCCESS)
+            if hasattr(self, "btn_activate"):
+                self.btn_activate.grid_remove()
+            if hasattr(self, "btn_live"):
+                self.btn_live.configure(text="Protección en Tiempo Real: Inactiva")
+            self.set_status("Licencia PRO activada con éxito.")
+            show_alert(self, "Licencia Activada", f"¡Felicidades! Se ha activado la versión PRO con éxito.\n\n{msg}", alert_type="success")
+        else:
+            self.set_status("Error al activar la licencia.")
+            show_alert(self, "Error de Activación", f"No se pudo activar la licencia:\n\n{msg}", alert_type="error")
+
+    def require_pro(self, feature_name="esta función"):
+        if not self.is_pro:
+            self.open_pro_upgrade_dialog(feature_name)
+            return False
+        return True
+
     # ================= LOGS Y ESTADOS =================
+    def clear_log(self):
+        def _clear():
+            self.log_textbox.configure(state="normal")
+            self.log_textbox.delete("1.0", "end")
+            self.log_textbox.configure(state="disabled")
+        self.after(0, _clear)
+
     def log(self, text):
-        self.log_textbox.configure(state="normal")
-        self.log_textbox.insert("end", text + "\n")
-        self.log_textbox.see("end")
-        self.log_textbox.configure(state="disabled")
+        def _append():
+            self.log_textbox.configure(state="normal")
+            self.log_textbox.insert("end", text + "\n")
+            self.log_textbox.see("end")
+            self.log_textbox.configure(state="disabled")
+        self.after(0, _append)
 
     def set_status(self, text):
-        self.lbl_status.configure(text=text)
+        self.after(0, lambda: self.lbl_status.configure(text=text))
 
     # ================= I/O CONFIG =================
     def load_config(self):
@@ -385,86 +533,99 @@ class MainWindow(ctk.CTk):
                 return True
         return False
 
-    # ================= ESCÁNER DE DISCO =================
+    # ================= ESCÁNER DE DISCO CON CONSOLA LIMPIA Y ETA =================
     def start_scan_thread(self):
         folder = self.entry_path.get().strip()
         if not folder or not os.path.isdir(folder):
-            messagebox.showwarning("Atención", "Seleccione una carpeta válida para inspeccionar.")
+            show_alert(self, "Atención", "Seleccione una carpeta válida para inspeccionar.", alert_type="warning")
             return
         self.btn_scan.configure(state="disabled")
         threading.Thread(target=self._run_scan, args=(folder,), daemon=True).start()
 
     def _run_scan(self, target_dir):
-        self.show_scanner_view()
+        self.after(0, self.show_scanner_view)
+        self.clear_log()
         self.log(f"--- Escaneando directorio: {target_dir} ---")
-        self.set_status("Analizando archivos...")
-        scanned = 0
-        threats = []
+        self.set_status("Contando archivos para análisis...")
 
+        # 1. Contar total de archivos elegibles
+        target_files = []
         for root, _, files in os.walk(target_dir):
             if self.is_path_excluded(root):
                 continue
-
             for file in files:
                 filepath = os.path.join(root, file)
                 if self.is_path_excluded(filepath):
                     continue
-
                 ext = os.path.splitext(file)[1].lower()
                 if ext in TARGET_EXTENSIONS:
-                    scanned += 1
-                    det_name, det_reason = None, None
-                    f_hash = calculate_sha256(filepath)
+                    target_files.append(filepath)
 
-                    # 1. Hashes SHA-256
-                    if f_hash and f_hash in self.signatures:
-                        det_reason = "Firma SHA-256"
-                        det_name = self.signatures[f_hash].get("malware_name", "Malware")
+        total_files = len(target_files)
+        self.after(0, lambda: self.progress_card.start("Analizando archivos...", total_files))
+        self.set_status("Analizando contenido...")
 
-                    # 2. Reglas YARA
-                    if not det_name:
-                        y_id, y_desc = analyze_yara(filepath)
-                        if y_id:
-                            det_reason = f"YARA ({y_id})"
-                            det_name = y_desc
+        scanned = 0
+        threats = []
 
-                    # 3. Heurística
-                    if not det_name:
-                        h_id, h_desc = analyze_heuristics(filepath)
-                        if h_id:
-                            det_reason = f"Heurística ({h_id})"
-                            det_name = h_desc
+        for idx, filepath in enumerate(target_files, 1):
+            file = os.path.basename(filepath)
+            ext = os.path.splitext(file)[1].lower()
+            scanned += 1
 
-                    # 4. Análisis PE
-                    if not det_name:
-                        pe_id, pe_desc = analyze_binary_pe(filepath)
-                        if pe_id:
-                            det_reason = f"Análisis PE ({pe_id})"
-                            det_name = pe_desc
+            self.after(0, lambda c=scanned, t=total_files, fp=filepath: self.progress_card.update_progress(c, t, fp))
 
-                    # 5. Filtro Authenticode (mitigación de falsos positivos)
-                    if det_name and ext in {".exe", ".dll", ".sys"}:
-                        is_signed, sign_msg = check_authenticode(filepath)
-                        if is_signed:
-                            self.log(f"[CONFIANZA] {file} firmado válidamente ({sign_msg}). Falso positivo omitido.")
-                            det_name = None
+            det_name, det_reason = None, None
+            f_hash = calculate_sha256(filepath)
 
-                    if det_name:
-                        self.log(f"[!] DETECCIÓN: {file} | {det_reason}: {det_name}")
-                        qp = isolate_file(filepath)
-                        if qp:
-                            self.log(f"    [+] Aislado en cuarentena: {os.path.basename(qp)}")
-                        threats.append({
-                            "file": file, "path": filepath, "hash": f_hash or "N/A",
-                            "reason": f"{det_reason}: {det_name}", "quarantined": qp is not None
-                        })
-                    else:
-                        self.log(f"[OK] {file}")
+            # Hashes SHA-256
+            if f_hash and f_hash in self.signatures:
+                det_reason = "Firma SHA-256"
+                det_name = self.signatures[f_hash].get("malware_name", "Malware")
+
+            # Reglas YARA
+            if not det_name:
+                y_id, y_desc = analyze_yara(filepath)
+                if y_id:
+                    det_reason = f"YARA ({y_id})"
+                    det_name = y_desc
+
+            # Heurística
+            if not det_name:
+                h_id, h_desc = analyze_heuristics(filepath)
+                if h_id:
+                    det_reason = f"Heurística ({h_id})"
+                    det_name = h_desc
+
+            # Análisis PE
+            if not det_name:
+                pe_id, pe_desc = analyze_binary_pe(filepath)
+                if pe_id:
+                    det_reason = f"Análisis PE ({pe_id})"
+                    det_name = pe_desc
+
+            # Filtro Authenticode
+            if det_name and ext in {".exe", ".dll", ".sys"}:
+                is_signed, sign_msg = check_authenticode(filepath)
+                if is_signed:
+                    det_name = None
+
+            # SOLO registrar si hay DETECCIÓN de amenaza
+            if det_name:
+                self.log(f"[!] DETECCIÓN: {file} | {det_reason}: {det_name}")
+                qp = isolate_file(filepath)
+                if qp:
+                    self.log(f"    [+] Aislado en cuarentena: {os.path.basename(qp)}")
+                threats.append({
+                    "file": file, "path": filepath, "hash": f_hash or "N/A",
+                    "reason": f"{det_reason}: {det_name}", "quarantined": qp is not None
+                })
 
         self.log("-" * 50)
         self.log(f"Finalizado: {scanned} inspeccionados, {len(threats)} neutralizados.")
         self.set_status(f"Completado: {len(threats)} detecciones.")
-        self.btn_scan.configure(state="normal")
+        self.after(0, lambda: self.progress_card.set_complete("Análisis finalizado", scanned))
+        self.after(0, lambda: self.btn_scan.configure(state="normal"))
 
         try:
             rep = generate_html_report(target_dir, scanned, threats)
@@ -473,16 +634,26 @@ class MainWindow(ctk.CTk):
             self.log(f"[x] Error en reporte: {e}")
 
         if threats:
-            messagebox.showwarning("Amenazas aisladas", f"Se detectaron y aislaron {len(threats)} archivo(s).")
+            self.after(0, lambda: show_alert(
+                self, "Amenazas Aisladas",
+                f"Se detectaron y aislaron {len(threats)} archivo(s) malicioso(s) en la carpeta de Cuarentena.",
+                alert_type="warning"
+            ))
         else:
-            messagebox.showinfo("Limpio", "No se encontraron anomalías en la ruta analizada.")
+            self.after(0, lambda: show_alert(
+                self, "Escaneo Completado",
+                f"Análisis finalizado con éxito.\nNo se encontraron amenazas en los {scanned} archivos inspeccionados.",
+                alert_type="success"
+            ))
 
     # ================= PROTECCIÓN EN TIEMPO REAL =================
     def toggle_live_protection(self):
         if not self.is_monitoring:
+            if not self.require_pro("Protección en Tiempo Real"):
+                return
             folder = self.entry_path.get().strip()
             if not folder or not os.path.isdir(folder):
-                messagebox.showwarning("Atención", "Seleccione un directorio válido para supervisar.")
+                show_alert(self, "Atención", "Seleccione un directorio válido para supervisar.", alert_type="warning")
                 return
 
             handler = LiveProtectionHandler(self)
@@ -538,7 +709,6 @@ class MainWindow(ctk.CTk):
         if det_name and ext in {".exe", ".dll", ".sys"}:
             is_signed, sign_msg = check_authenticode(filepath)
             if is_signed:
-                self.log(f"[Monitor Confiable] {filename} verificado por firma digital ({sign_msg}).")
                 return
 
         if det_name:
@@ -546,30 +716,65 @@ class MainWindow(ctk.CTk):
             qp = isolate_file(filepath)
             if qp:
                 self.log(f"    [+] Aislado en cuarentena: {os.path.basename(qp)}")
-        else:
-            self.log(f"[Monitor OK] {filename}")
 
-    # ================= MÓDULOS DEL SISTEMA =================
+    # ================= MÓDULOS DEL SISTEMA: ESCÁNER RAM AUTOMÁTICO =================
     def start_procs_thread(self):
+        if not self.require_pro("Escáner de RAM"):
+            return
+        # 1. Redirigir a la vista de análisis
         self.show_scanner_view()
+        # 2. Vaciar texto de búsquedas anteriores obligatoriamente
+        self.clear_log()
+        # 3. Cambiar la etiqueta de estado
+        self.set_status("Escaneando procesos activos en memoria RAM...")
+        # 4. Iniciar automáticamente el hilo de psutil
         threading.Thread(target=self._run_procs, daemon=True).start()
 
     def _run_procs(self):
-        self.log("\n=== INSPECCIONANDO PROCESOS EN RAM ===")
-        self.set_status("Examinando procesos activos...")
-        inspected, threats = scan_running_processes(self.signatures)
+        self.log("=== INSPECCIONANDO PROCESOS EN MEMORIA RAM ===")
+        self.set_status("Escaneando procesos activos en memoria RAM...")
+
+        def _on_ram_progress(cur, tot, item_name):
+            self.after(0, lambda c=cur, t=tot, item=item_name: self.progress_card.update_progress(c, t, item))
+
+        self.after(0, lambda: self.progress_card.start("Escaneando procesos activos en RAM...", 100))
+
+        inspected, threats = scan_running_processes(self.signatures, progress_callback=_on_ram_progress)
+
         for t in threats:
             self.log(f"[!] PROCESO TERMINADO: {t['name']} (PID: {t['pid']}) -> {t['malware']}")
-        self.log(f"RAM concluida: {inspected} evaluados, {len(threats)} neutralizados.")
+
+        self.log("-" * 50)
+        self.log(f"Inspección de RAM concluida: {inspected} procesos evaluados, {len(threats)} neutralizados.")
         self.set_status("Inspección de RAM finalizada.")
+        self.after(0, lambda: self.progress_card.set_complete("Inspección de RAM finalizada", inspected))
+
+        if threats:
+            self.after(0, lambda: show_alert(
+                self, "Procesos Neutralizados",
+                f"Se detectaron y terminaron {len(threats)} proceso(s) malicioso(s) en RAM.",
+                alert_type="warning"
+            ))
+        else:
+            self.after(0, lambda: show_alert(
+                self, "RAM Limpia",
+                f"Se evaluaron {inspected} procesos en ejecución.\nNo se detectaron binarios maliciosos en memoria.",
+                alert_type="success"
+            ))
 
     def start_persistence_thread(self):
+        if not self.require_pro("Auditoría de Persistencia"):
+            return
         self.show_scanner_view()
+        self.clear_log()
+        self.set_status("Auditando entradas del registro de auto-inicio...")
         threading.Thread(target=self._run_persistence, daemon=True).start()
 
     def _run_persistence(self):
-        self.log("\n=== AUDITORÍA DE PERSISTENCIA EN REGISTRO ===")
+        self.log("=== AUDITORÍA DE PERSISTENCIA EN REGISTRO DE WINDOWS ===")
         self.set_status("Auditando entradas del registro...")
+        self.after(0, lambda: self.progress_card.start("Auditando registro de auto-inicio...", 100))
+
         total, flagged = audit_registry(self.signatures)
 
         verified = []
@@ -578,30 +783,35 @@ class MainWindow(ctk.CTk):
             if os.path.isfile(path):
                 is_signed, _ = check_authenticode(path)
                 if is_signed:
-                    self.log(f"[OK Authenticode] Entrada de inicio verificada: {item['name']}")
                     continue
             verified.append(item)
 
         for item in verified:
             self.log(f"[!] ENTRADA SOSPECHOSA: [{item['label']}] {item['name']}")
             self.log(f"    Ejecutable: {item['command']}")
+
+        self.log("-" * 50)
         self.log(f"Persistencia finalizada: {total} examinadas, {len(verified)} sospechosas.")
         self.set_status("Auditoría de registro concluida.")
+        self.after(0, lambda: self.progress_card.set_complete("Auditoría de registro concluida", total))
 
     def start_vt_thread(self):
         target = self.entry_path.get().strip()
         if not target or not os.path.isfile(target):
-            messagebox.showwarning("Atención", "Seleccione un archivo puntual para consultar en VirusTotal.")
+            show_alert(self, "Atención", "Seleccione un archivo puntual para consultar en VirusTotal.", alert_type="warning")
             return
         if not self.vt_api_key:
-            messagebox.showinfo("Configuración requerida", "Ingrese su API Key de VirusTotal en la pestaña Configuración.")
+            show_alert(self, "Configuración requerida", "Ingrese su API Key de VirusTotal en la pestaña Configuración.", alert_type="info")
             self.show_config_view()
             return
         threading.Thread(target=self._run_vt, args=(target,), daemon=True).start()
 
     def _run_vt(self, filepath):
-        self.show_scanner_view()
-        self.log(f"\n[*] Consultando VirusTotal: {os.path.basename(filepath)}...")
+        self.after(0, self.show_scanner_view)
+        self.clear_log()
+        self.log(f"[*] Consultando VirusTotal: {os.path.basename(filepath)}...")
+        self.after(0, lambda: self.progress_card.start("Consultando VirusTotal API...", 1))
+
         f_hash = calculate_sha256(filepath)
         code, stats, results = check_virustotal_hash(f_hash, self.vt_api_key)
 
@@ -620,35 +830,44 @@ class MainWindow(ctk.CTk):
         else:
             self.log(f"[x] Error en la API de VirusTotal (Código: {code}).")
 
+        self.after(0, lambda: self.progress_card.set_complete("Consulta VirusTotal finalizada", 1))
+
     def start_update_thread(self):
         self.show_scanner_view()
+        self.clear_log()
         threading.Thread(target=self._run_update, daemon=True).start()
 
     def _run_update(self):
-        self.log("\n[*] Sincronizando firmas desde ThreatFox...")
+        self.log("[*] Sincronizando firmas desde ThreatFox...")
+        self.after(0, lambda: self.progress_card.start("Sincronizando firmas desde ThreatFox...", 100))
+
         ok, res, new_sigs = update_signatures_from_cloud(self.signatures)
         if ok:
             self.signatures = new_sigs
-            self.lbl_sig_count.configure(text=f"Firmas: {len(self.signatures)}")
+            self.after(0, lambda: self.lbl_sig_count.configure(text=f"Firmas CTI: {len(self.signatures)}"))
             self.log(f"[✓] Actualización completada: +{res} firmas añadidas.")
-            messagebox.showinfo("Actualización exitosa", f"Se incorporaron {res} nuevas firmas.")
+            self.after(0, lambda: show_alert(self, "Actualización Exitosa", f"Se incorporaron {res} nuevas firmas de malware.", alert_type="success"))
         else:
             self.log(f"[!] Error de sincronización: {res}")
 
-    def manage_context_menu(self):
-        op = messagebox.askyesnocancel(
-            "Integración Shell",
-            "¿Desea registrar 'Analizar con KILLVirus' en el menú contextual de Windows?\n\n"
-            "- Sí: Activar\n- No: Desactivar\n- Cancelar: Salir"
-        )
-        if op is True:
-            ok, msg = register_context_menu()
-            messagebox.showinfo("Menú Contextual", msg) if ok else messagebox.showerror("Error", msg)
-        elif op is False:
-            ok, msg = unregister_context_menu()
-            messagebox.showinfo("Menú Contextual", msg) if ok else messagebox.showerror("Error", msg)
+        self.after(0, lambda: self.progress_card.set_complete("Actualización de firmas completada", len(self.signatures)))
 
-    # ================= GESTOR DE CUARENTENA =================
+    def manage_context_menu(self):
+        def _on_confirm(ok_choice):
+            if ok_choice is True:
+                ok, msg = register_context_menu()
+                show_alert(self, "Menú Contextual", msg, alert_type="success" if ok else "error")
+            elif ok_choice is False:
+                ok, msg = unregister_context_menu()
+                show_alert(self, "Menú Contextual", msg, alert_type="info" if ok else "error")
+
+        ask_confirm(
+            self, "Integración Shell de Windows",
+            "¿Desea registrar 'Analizar con KILLVirus' en el menú contextual de clic derecho de Windows?",
+            callback=_on_confirm
+        )
+
+    # ================= GESTOR DE CUARENTENA MEJORADO =================
     def refresh_quarantine_table(self):
         self.tree_quar.delete(*self.tree_quar.get_children())
         if not os.path.exists(QUARANTINE_DIR):
@@ -665,55 +884,90 @@ class MainWindow(ctk.CTk):
                             date_str = json.load(m).get("date", "Desconocida")
                     except Exception:
                         pass
-                self.tree_quar.insert("", "end", values=(file, sz, date_str))
 
-    def restore_quarantined_file(self):
+                # Formato de fecha legible DD/MM/YYYY HH:MM:SS
+                formatted_date = format_quarantine_date(date_str)
+                self.tree_quar.insert("", "end", iid=file, values=(file, sz, formatted_date))
+
+    def select_all_quarantine(self):
+        children = self.tree_quar.get_children()
+        if children:
+            self.tree_quar.selection_set(children)
+
+    def show_quarantine_detail(self):
         sel = self.tree_quar.selection()
         if not sel:
-            messagebox.showwarning("Atención", "Seleccione un archivo de la lista.")
+            show_alert(self, "Atención", "Seleccione un archivo de la lista para ver su detalle.", alert_type="info")
             return
-        item = self.tree_quar.item(sel[0])["values"][0]
-        q_path = os.path.join(QUARANTINE_DIR, item)
-        meta_p = q_path + ".meta"
-        dest = None
+        item_file = sel[0]
+        q_path = os.path.join(QUARANTINE_DIR, item_file)
+        QuarantineDetailModal(self, q_path)
 
-        if os.path.exists(meta_p):
-            try:
-                with open(meta_p, "r", encoding="utf-8") as m:
-                    dest = json.load(m).get("original_path")
-            except Exception:
-                pass
-
-        if not dest:
-            dest = filedialog.asksaveasfilename(initialfile=item.replace(".quarantine", ""))
-
-        if dest:
-            try:
-                shutil.move(q_path, dest)
-                if os.path.exists(meta_p):
-                    os.remove(meta_p)
-                messagebox.showinfo("Éxito", f"Archivo restaurado en:\n{dest}")
-                self.refresh_quarantine_table()
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo restaurar: {e}")
-
-    def delete_quarantined_file(self):
+    def restore_selected_quarantine(self):
         sel = self.tree_quar.selection()
         if not sel:
-            messagebox.showwarning("Atención", "Seleccione un elemento de la lista.")
+            show_alert(self, "Atención", "Seleccione uno o varios archivos para restaurar.", alert_type="info")
             return
-        if not messagebox.askyesno("Confirmar", "¿Eliminar definitivamente este archivo del disco?"):
-            return
-        item = self.tree_quar.item(sel[0])["values"][0]
-        q_path = os.path.join(QUARANTINE_DIR, item)
-        meta_p = q_path + ".meta"
-        try:
-            os.remove(q_path)
+
+        restored_count = 0
+        for item_file in sel:
+            q_path = os.path.join(QUARANTINE_DIR, item_file)
+            meta_p = q_path + ".meta"
+            dest = None
+
             if os.path.exists(meta_p):
-                os.remove(meta_p)
+                try:
+                    with open(meta_p, "r", encoding="utf-8") as m:
+                        dest = json.load(m).get("original_path")
+                except Exception:
+                    pass
+
+            if not dest:
+                dest = filedialog.asksaveasfilename(initialfile=item_file.replace(".quarantine", ""))
+
+            if dest:
+                try:
+                    shutil.move(q_path, dest)
+                    if os.path.exists(meta_p):
+                        os.remove(meta_p)
+                    restored_count += 1
+                except Exception as e:
+                    show_alert(self, "Error al restaurar", f"No se pudo restaurar {item_file}: {e}", alert_type="error")
+
+        if restored_count > 0:
+            show_alert(self, "Restauración Completada", f"Se restauraron {restored_count} archivo(s) a su ubicación original.", alert_type="success")
             self.refresh_quarantine_table()
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo eliminar: {e}")
+
+    def delete_selected_quarantine(self):
+        sel = self.tree_quar.selection()
+        if not sel:
+            show_alert(self, "Atención", "Seleccione uno o varios archivos para eliminar.", alert_type="info")
+            return
+
+        def _do_delete(confirmed):
+            if not confirmed:
+                return
+            deleted_count = 0
+            for item_file in sel:
+                q_path = os.path.join(QUARANTINE_DIR, item_file)
+                meta_p = q_path + ".meta"
+                try:
+                    if os.path.exists(q_path):
+                        os.remove(q_path)
+                    if os.path.exists(meta_p):
+                        os.remove(meta_p)
+                    deleted_count += 1
+                except Exception as e:
+                    show_alert(self, "Error de eliminación", f"No se pudo eliminar {item_file}: {e}", alert_type="error")
+
+            show_alert(self, "Eliminación Completada", f"Se eliminaron {deleted_count} elemento(s) de la cuarentena.", alert_type="success")
+            self.refresh_quarantine_table()
+
+        ask_confirm(
+            self, "Confirmar Eliminación",
+            f"¿Está seguro de eliminar definitivamente los {len(sel)} archivo(s) seleccionados del disco?",
+            callback=_do_delete
+        )
 
     # ================= CONFIGURACIÓN =================
     def save_api_key(self):
@@ -721,7 +975,7 @@ class MainWindow(ctk.CTk):
         self.vt_api_key = key
         self.config["vt_api_key"] = key
         self.save_config()
-        messagebox.showinfo("Configuración", "API Key de VirusTotal guardada.")
+        show_alert(self, "Configuración", "API Key de VirusTotal guardada correctamente.", alert_type="success")
 
     def add_exclusion_folder(self):
         folder = filedialog.askdirectory()
@@ -735,7 +989,7 @@ class MainWindow(ctk.CTk):
         self.exclusions = set(lines)
         self.config["exclusions"] = list(self.exclusions)
         self.save_config()
-        messagebox.showinfo("Configuración", "Lista de exclusiones actualizada.")
+        show_alert(self, "Configuración", "Lista de exclusiones actualizada correctamente.", alert_type="success")
 
     # ================= BANDEJA Y CIERRE =================
     def on_closing(self):

@@ -14,5 +14,7 @@ __pycache__/
 cuarentena/
 reportes/
 
-# Claves locales y configuraciones personales
+# Claves locales, entorno y configuraciones personales
+.env
+.env.local
 data/config.json

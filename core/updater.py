@@ -3,7 +3,7 @@ import json
 import requests
 
 FEED_URL = "https://threatfox.abuse.ch/export/csv/sha256/recent/"
-SIGNATURES_FILE = "signatures.json"
+SIGNATURES_FILE = os.path.join("data", "signatures.json")
 
 def update_signatures_from_cloud(current_signatures):
     headers = {"User-Agent": "Mozilla/5.0"}
