@@ -23,9 +23,12 @@ def _load_env():
 
 _load_env()
 
-# Credenciales de Supabase leídas desde entorno / .env
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.environ.get("SUPABASE_KEY", "")
+# Credenciales de Supabase con fallback obligatorio para ejecutable compilado (.exe)
+DEFAULT_SUPABASE_URL = "https://ppwfaogyofmskpshvldc.supabase.co"
+DEFAULT_SUPABASE_KEY = "sb_secret_NMc5Jw4HI1R7GTO76lSCyg_mgXzv32c"
+
+SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip() or DEFAULT_SUPABASE_URL
+SUPABASE_ANON_KEY = (os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_KEY") or "").strip() or DEFAULT_SUPABASE_KEY
 
 LOCAL_LICENSE_FILE = os.path.join("data", "license.json")
 
