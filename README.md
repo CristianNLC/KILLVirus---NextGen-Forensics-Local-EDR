@@ -1,59 +1,41 @@
-# ⚔️ KILLVirus v2.0 - NextGen Forensics, Local EDR & Cloud Licensing
+# ⚔️ KILLVirus — NextGen Forensics & Local EDR
 
-[![License](https://img.shields.io/badge/License-Proprietary-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3.14-yellow.svg)](https://www.python.org/)
-[![GUI](https://img.shields.io/badge/GUI-CustomTkinter-blueviolet.svg)](https://github.com/TomSchimansky/CustomTkinter)
-[![Database](https://img.shields.io/badge/Cloud%20DB-Supabase%20PostgreSQL-3ECF8E.svg)](https://supabase.com/)
-
-**KILLVirus v2.0** es una solución de seguridad endpoint y análisis forense local desarrollada en Python y empaquetada como binario nativo de Windows. Cuenta con una interfaz moderna y desacoplada, gestión avanzada de cuarentena, motores heurísticos y estáticos, y un modelo de licenciamiento comercial en la nube con Supabase.
+**KILLVirus** es una suite de seguridad endpoint (EDR local) y análisis forense para Windows, desarrollada en Python y CustomTkinter. 100% gratuita y de código abierto (FOSS), diseñada para técnicos de soporte, investigadores de ciberseguridad y entusiastas.
 
 ---
 
-## ✨ Novedades de la Versión 2.0
+## 🚀 Capacidades y Arquitectura
 
-* **Interfaz Gráfica Moderna (CustomTkinter):** Rediseño con navegación por barra lateral (*Sidebar*), alternancia de tema Claro/Oscuro y diálogos modales nativos estilizados.
-* **Telemetría y Progreso en Vivo:** Barras de carga con cálculo de porcentaje y tiempo estimado (ETA) durante análisis en disco y memoria.
-* **Modelo Free vs. PRO:** Control de acceso por niveles. Las capacidades forenses profundas (inspección de RAM, auditoría de claves Run/RunOnce y reportes HTML completos) se desbloquean mediante licencia activa.
-* **Anti-Piratería y Licencias en Supabase:** Validación de claves tanto online como en caché local cifrada, con vinculación única al hardware del equipo (`hardware_id`).
-* **Venta Automatizada:** Integración de webhook para procesamiento de pagos y aprovisionamiento automático de credenciales.
-* **Gestor de Cuarentena Reestructurado:** Fechas legibles, inspección de metadatos forenses (`.meta`) y eliminación/restauración por lotes.
-
----
-
-## 🚀 Capacidades y Arquitectura de Detección
-
-* **CTI Hashes Feed:** Detección de malware por SHA-256 alimentado por fuentes de inteligencia de amenazas de **ThreatFox** (*abuse.ch*).
-* **Análisis Estático PE:** Cálculo de entropía en secciones de binarios (`.exe`, `.dll`) para detectar empaquetadores y llamadas anómalas a la API de Windows.
-* **Reglas Heurísticas:** Detección de patrones maliciosos en scripts (`.ps1`, `.bat`, `.cmd`, `.vbs`) y técnicas comunes de ofuscación o descarga oculta.
-* **Inspección de Procesos en RAM (PRO):** Monitoreo activo de procesos sospechosos en ejecución con capacidad de terminación forzosa.
-* **Auditoría de Persistencia (PRO):** Rastreo de claves de inicio del Registro de Windows (`Run` y `RunOnce`).
-* **Validación Authenticode:** Verificación de certificados digitales de Windows (`WinVerifyTrust`) para mitigar falsos positivos en binarios firmados.
-* **Protección Activa en Segundo Plano:** Vigilancia de eventos en tiempo real con *Watchdog* y minimización a la bandeja del sistema (*System Tray*).
-* **Consultas Cloud:** Integración con la API v3 de **VirusTotal**.
+* **Motor CTI de Hashes:** Detección de malware por SHA-256 alimentado por los feeds de inteligencia de amenazas de **ThreatFox** (*abuse.ch*).
+* **Análisis Estático PE:** Inspección de cabeceras de ejecutables (.exe, .dll) con cálculo de entropía por secciones y auditoría de llamadas a la API sospechosas.
+* **Reglas YARA:** Detección de firmas y patrones complejos en disco y memoria RAM.
+* **Validación Authenticode:** Integración nativa con la API de Windows (WinVerifyTrust) para mitigar falsos positivos en binarios oficiales firmados.
+* **Escaneo de Procesos en RAM:** Inspección activa y terminación forzosa de procesos y subprocesos maliciosos.
+* **Auditoría de Persistencia:** Revisión exhaustiva de claves de ejecución en el Registro de Windows (Run / RunOnce).
+* **Protección en Vivo:** Monitor de sistema de archivos en segundo plano minimizable a la bandeja del sistema (*System Tray*).
+* **Gestor Forense:** Cuarentena segura con aislamiento criptográfico, metadatos y exportación de reportes.
+* **100% Gratuito y Libre:** Sin suscripciones, muros de pago ni recopilación de telemetría invasiva.
 
 ---
 
-## 🛠️ Estructura del Proyecto
+## ☕ Apoyo al Proyecto
 
-```text
-Proyecto_Antivirus/
-│
-├── core/                # Motores de análisis, cuarentena y licenciamiento
-│   ├── authenticode.py  # Validación de firmas digitales de Windows
-│   ├── licensing.py     # Cliente de validación con Supabase y hardware_id
-│   ├── memory.py        # Escaneo y control de procesos en RAM
-│   ├── pe_analyzer.py   # Entropía de secciones PE y análisis estático
-│   ├── persistence.py   # Auditoría de claves Run / RunOnce
-│   ├── quarantine.py    # Aislamiento y manipulación de archivos
-│   ├── scanner.py       # Motor de hashes SHA-256 y heurística
-│   └── virustotal.py    # Integración API v3
-│
-├── ui/                  # Capa de presentación desacoplada (CustomTkinter)
-│   ├── components/      # Modales, barras de progreso y vistas dinámicas
-│   ├── main_window.py   # Ventana principal y gestor de vistas
-│   └── theme.py         # Paleta de colores e identidades visuales
-│
-├── billing/             # Webhook de pasarela de pago y provisión de licencias
-├── data/                # Bases de datos locales de firmas y licencias
-├── assets/              # Iconos e identidad visual
-└── app.pyw              # Punto de entrada de la aplicación
+KILLVirus es un proyecto de código abierto y mantenimiento independiente. Si la herramienta te resulta de utilidad y deseas colaborar con su evolución continua:
+
+- ☕ **Cafecito (Argentina):** https://cafecito.app/cristian_dev
+- ⭐ **Repositorio oficial:** https://github.com/CristianNLC/KILLVirus---NextGen-Forensics-Local-EDR
+
+---
+
+## 🛠️ Instalación y Uso
+
+### Ejecutable Listo para Usar
+Descarga el instalador oficial desde el apartado de **Releases** (KILLVirus_v2_Setup.exe) e instálalo con permisos de administrador.
+
+### Ejecución desde Código Fuente
+`ash
+git clone [https://github.com/CristianNLC/KILLVirus---NextGen-Forensics-Local-EDR.git](https://github.com/CristianNLC/KILLVirus---NextGen-Forensics-Local-EDR.git)
+cd KILLVirus---NextGen-Forensics-Local-EDR
+pip install -r requirements.txt
+python app.pyw
+`

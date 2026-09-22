@@ -4,6 +4,7 @@ import json
 import time
 import shutil
 import threading
+import webbrowser
 from datetime import datetime
 import customtkinter as ctk
 from tkinter import filedialog, simpledialog, ttk
@@ -17,7 +18,7 @@ from ui.theme import (
     COLOR_TEXT_PRIMARY, COLOR_TEXT_SECONDARY, COLOR_TEXT_MUTED, FONT_FAMILY
 )
 from ui.components import (
-    HelpModal, ProUpgradeModal, ProgressCard,
+    HelpModal, ProgressCard,
     show_alert, ask_confirm, QuarantineDetailModal, format_quarantine_date
 )
 
@@ -33,7 +34,6 @@ from core.updater import update_signatures_from_cloud
 from core.reporter import generate_html_report
 from core.tray import SystemTrayManager
 from core.context_menu import register_context_menu, unregister_context_menu
-from core.licensing import get_saved_license, verify_license_online
 
 SIGNATURES_FILE = os.path.join("data", "signatures.json")
 CONFIG_FILE = os.path.join("data", "config.json")
@@ -76,10 +76,7 @@ class MainWindow(ctk.CTk):
         self.geometry("1100x720")
         self.minsize(980, 640)
         self.configure(fg_color=COLOR_BG)
-
-        self.is_pro = False
-        self.license_info = None
-        self.check_initial_license()
+        self.title("KILLVirus - NextGen Forensics & EDR")
 
         # Icono de aplicación
         icon_path = os.path.join("assets", "icon.ico")
@@ -160,30 +157,20 @@ class MainWindow(ctk.CTk):
         self.opt_theme.set(saved_mode)
         self.opt_theme.pack(side="right")
 
-        # Insignia de Licencia y Botón PRO
-        badge_text = "★ KILLVirus PRO" if self.is_pro else "KILLVirus Gratuito"
-        badge_color = COLOR_SUCCESS if self.is_pro else COLOR_TEXT_MUTED
-        self.lbl_license_badge = ctk.CTkLabel(
-            self.sidebar, text=badge_text,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            text_color=badge_color
+        # Botón de Donaciones / Apoyo al Proyecto
+        self.btn_donate = ctk.CTkButton(
+            self.sidebar, text="☕ Apoyar el Proyecto", height=32, corner_radius=6,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
+            fg_color="#eab308", text_color="#18181b", hover_color="#ca8a04",
+            command=self.open_donation_modal
         )
-        self.lbl_license_badge.grid(row=8, column=0, padx=20, pady=(4, 4), sticky="w")
-
-        self.btn_activate = ctk.CTkButton(
-            self.sidebar, text="⭐ Obtener Licencia PRO", height=34, corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER,
-            command=self.open_pro_upgrade_dialog
-        )
-        if not self.is_pro:
-            self.btn_activate.grid(row=9, column=0, padx=16, pady=(0, 10), sticky="ew")
+        self.btn_donate.grid(row=8, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         self.lbl_sig_count = ctk.CTkLabel(
             self.sidebar, text=f"Firmas CTI: {len(self.signatures)}",
             font=ctk.CTkFont(family=FONT_FAMILY, size=11), text_color=COLOR_TEXT_MUTED
         )
-        self.lbl_sig_count.grid(row=10, column=0, padx=20, pady=(0, 16), sticky="w")
+        self.lbl_sig_count.grid(row=9, column=0, padx=20, pady=(0, 16), sticky="w")
 
         # ---------------- CONTENEDOR PRINCIPAL ----------------
         self.container = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -242,8 +229,7 @@ class MainWindow(ctk.CTk):
         self.btn_scan = ctk.CTkButton(actions, text="Iniciar Escaneo de Disco", height=42, fg_color=COLOR_ACCENT, hover_color=COLOR_ACCENT_HOVER, command=self.start_scan_thread)
         self.btn_scan.grid(row=0, column=0, padx=(0, 8), sticky="ew")
 
-        live_text = "Protección en Tiempo Real 🔒 PRO" if not self.is_pro else "Protección en Tiempo Real: Inactiva"
-        self.btn_live = ctk.CTkButton(actions, text=live_text, height=42, fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_HOVER, command=self.toggle_live_protection)
+        self.btn_live = ctk.CTkButton(actions, text="Protección en Tiempo Real: Inactiva", height=42, fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_HOVER, command=self.toggle_live_protection)
         self.btn_live.grid(row=0, column=1, padx=4, sticky="ew")
 
         self.btn_vt = ctk.CTkButton(actions, text="Consultar VirusTotal", height=42, fg_color=COLOR_CARD, hover_color=COLOR_CARD_HOVER, text_color=COLOR_TEXT_PRIMARY, command=self.start_vt_thread)
@@ -273,19 +259,19 @@ class MainWindow(ctk.CTk):
         v = ctk.CTkFrame(self.container, fg_color="transparent")
         v.grid_columnconfigure((0, 1), weight=1)
 
-        # RAM (PRO)
+        # RAM
         card_ram = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
         card_ram.grid(row=0, column=0, padx=(0, 10), pady=(0, 12), sticky="nsew")
         
-        lbl_ram_h = ctk.CTkLabel(card_ram, text="Inspección de Procesos RAM 🔒 PRO", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY)
+        lbl_ram_h = ctk.CTkLabel(card_ram, text="Inspección de Procesos RAM", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY)
         lbl_ram_h.pack(anchor="w", padx=16, pady=(16, 6))
         ctk.CTkLabel(card_ram, text="Examina los binarios cargados en memoria y neutraliza procesos maliciosos activos.", wraplength=340, justify="left", text_color=COLOR_TEXT_SECONDARY).pack(anchor="w", padx=16, pady=(0, 14))
         ctk.CTkButton(card_ram, text="Escanear Memoria RAM", command=self.start_procs_thread).pack(anchor="w", padx=16, pady=(0, 16))
 
-        # Persistencia (PRO)
+        # Persistencia
         card_pers = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
         card_pers.grid(row=0, column=1, padx=(10, 0), pady=(0, 12), sticky="nsew")
-        ctk.CTkLabel(card_pers, text="Auditoría de Registro (Persistencia) 🔒 PRO", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(16, 6))
+        ctk.CTkLabel(card_pers, text="Auditoría de Registro (Persistencia)", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(16, 6))
         ctk.CTkLabel(card_pers, text="Verifica claves Run/RunOnce y valida certificados Authenticode de cada programa al inicio.", wraplength=340, justify="left", text_color=COLOR_TEXT_SECONDARY).pack(anchor="w", padx=16, pady=(0, 14))
         ctk.CTkButton(card_pers, text="Auditar Registro de Windows", command=self.start_persistence_thread).pack(anchor="w", padx=16, pady=(0, 16))
 
@@ -419,53 +405,94 @@ class MainWindow(ctk.CTk):
     def open_help_modal(self):
         HelpModal(self)
 
-    def open_pro_upgrade_dialog(self, feature_name="KILLVirus PRO"):
-        ProUpgradeModal(self, feature_name=feature_name, on_activate_callback=self.activate_with_key)
+    def open_donation_modal(self):
+        modal = ctk.CTkToplevel(self)
+        modal.title("☕ Apoyar el Proyecto KILLVirus")
+        modal.geometry("480x360")
+        modal.resizable(False, False)
+        modal.configure(fg_color=COLOR_BG)
+        modal.transient(self)
+
+        modal.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() // 2) - (480 // 2)
+        y = self.winfo_y() + (self.winfo_height() // 2) - (360 // 2)
+        modal.geometry(f"480x360+{max(0, x)}+{max(0, y)}")
+
+        container = ctk.CTkFrame(modal, fg_color=COLOR_CARD, corner_radius=12)
+        container.pack(fill="both", expand=True, padx=20, pady=20)
+
+        title_lbl = ctk.CTkLabel(
+            container,
+            text="☕ Apoyar el Proyecto KILLVirus",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=18, weight="bold"),
+            text_color=COLOR_GOLD
+        )
+        title_lbl.pack(pady=(20, 10), padx=20)
+
+        desc_text = (
+            "KILLVirus es una suite de seguridad y análisis forense 100% gratuita "
+            "y de código abierto. Si la herramienta te resulta de utilidad y deseas "
+            "colaborar con su mantenimiento continuo, cualquier contribución es bienvenida."
+        )
+        desc_lbl = ctk.CTkLabel(
+            container,
+            text=desc_text,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            text_color=COLOR_TEXT_SECONDARY,
+            wraplength=400,
+            justify="center"
+        )
+        desc_lbl.pack(pady=(0, 20), padx=20)
+
+        btn_cafecito = ctk.CTkButton(
+            container,
+            text="☕ Donar en Cafecito (Argentina)",
+            height=38,
+            corner_radius=8,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            fg_color="#eab308",
+            text_color="#18181b",
+            hover_color="#ca8a04",
+            command=lambda: webbrowser.open("https://cafecito.app/cristian_dev")
+        )
+        btn_cafecito.pack(fill="x", padx=30, pady=(0, 10))
+
+        btn_github = ctk.CTkButton(
+            container,
+            text="⭐ Ver Repositorio en GitHub",
+            height=38,
+            corner_radius=8,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER,
+            text_color="#ffffff",
+            command=lambda: webbrowser.open("https://github.com/CristianNLC/KILLVirus---NextGen-Forensics-Local-EDR")
+        )
+        btn_github.pack(fill="x", padx=30, pady=(0, 12))
+
+        btn_close = ctk.CTkButton(
+            container,
+            text="Cerrar",
+            height=32,
+            corner_radius=6,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+            fg_color="transparent",
+            border_width=1,
+            border_color=COLOR_TEXT_MUTED,
+            text_color=COLOR_TEXT_PRIMARY,
+            hover_color=COLOR_CARD_HOVER,
+            command=modal.destroy
+        )
+        btn_close.pack(padx=30, pady=(0, 15))
+
+        modal.grab_set()
+        modal.focus_force()
 
     def change_appearance_mode_event(self, new_mode_str: str):
         mode = "Dark" if new_mode_str == "Oscuro" else "Light"
         ctk.set_appearance_mode(mode)
         self.config["appearance_mode"] = new_mode_str
         self.save_config()
-
-    # ================= LICENCIAMIENTO Y CONTROL DE ACCESO =================
-    def check_initial_license(self):
-        saved = get_saved_license()
-        if saved and saved.get("clave"):
-            ok, msg, data = verify_license_online(saved["clave"])
-            if ok:
-                self.is_pro = True
-                self.license_info = data or saved
-                self.title("KILLVirus PRO - Edición Profesional")
-                return
-        self.is_pro = False
-        self.license_info = None
-        self.title("KILLVirus Community - (Versión Gratuita)")
-
-    def activate_with_key(self, key: str):
-        self.set_status("Validando clave de licencia...")
-        ok, msg, data = verify_license_online(key)
-        if ok:
-            self.is_pro = True
-            self.license_info = data
-            self.title("KILLVirus PRO - Edición Profesional")
-            if hasattr(self, "lbl_license_badge"):
-                self.lbl_license_badge.configure(text="★ KILLVirus PRO", text_color=COLOR_SUCCESS)
-            if hasattr(self, "btn_activate"):
-                self.btn_activate.grid_remove()
-            if hasattr(self, "btn_live"):
-                self.btn_live.configure(text="Protección en Tiempo Real: Inactiva")
-            self.set_status("Licencia PRO activada con éxito.")
-            show_alert(self, "Licencia Activada", f"¡Felicidades! Se ha activado la versión PRO con éxito.\n\n{msg}", alert_type="success")
-        else:
-            self.set_status("Error al activar la licencia.")
-            show_alert(self, "Error de Activación", f"No se pudo activar la licencia:\n\n{msg}", alert_type="error")
-
-    def require_pro(self, feature_name="esta función"):
-        if not self.is_pro:
-            self.open_pro_upgrade_dialog(feature_name)
-            return False
-        return True
 
     # ================= LOGS Y ESTADOS =================
     def clear_log(self):
@@ -649,8 +676,6 @@ class MainWindow(ctk.CTk):
     # ================= PROTECCIÓN EN TIEMPO REAL =================
     def toggle_live_protection(self):
         if not self.is_monitoring:
-            if not self.require_pro("Protección en Tiempo Real"):
-                return
             folder = self.entry_path.get().strip()
             if not folder or not os.path.isdir(folder):
                 show_alert(self, "Atención", "Seleccione un directorio válido para supervisar.", alert_type="warning")
@@ -719,8 +744,6 @@ class MainWindow(ctk.CTk):
 
     # ================= MÓDULOS DEL SISTEMA: ESCÁNER RAM AUTOMÁTICO =================
     def start_procs_thread(self):
-        if not self.require_pro("Escáner de RAM"):
-            return
         # 1. Redirigir a la vista de análisis
         self.show_scanner_view()
         # 2. Vaciar texto de búsquedas anteriores obligatoriamente
@@ -763,8 +786,6 @@ class MainWindow(ctk.CTk):
             ))
 
     def start_persistence_thread(self):
-        if not self.require_pro("Auditoría de Persistencia"):
-            return
         self.show_scanner_view()
         self.clear_log()
         self.set_status("Auditando entradas del registro de auto-inicio...")
