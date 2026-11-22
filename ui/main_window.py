@@ -2,10 +2,13 @@ import os
 import sys
 import json
 import time
+import queue
 import shutil
+import logging
 import threading
 import webbrowser
 from datetime import datetime
+import tkinter as tk
 import customtkinter as ctk
 from tkinter import filedialog, simpledialog, ttk
 from watchdog.observers import Observer
@@ -22,67 +25,168 @@ from ui.components import (
     show_alert, ask_confirm, QuarantineDetailModal, format_quarantine_date
 )
 
-from core.scanner import (
-    TARGET_EXTENSIONS, calculate_sha256, analyze_heuristics,
-    analyze_binary_pe, analyze_yara, check_authenticode
+from core import __app_name__, __version__
+from core.exclusions import is_excluded, parse_exclusions
+from core.scanner import TARGET_EXTENSIONS, calculate_sha256, check_authenticode
+from core.scan_engine import scan_file
+from core.yara_scanner import HAS_YARA, UNAVAILABLE_REASON
+from core.logging_setup import install_excepthook, setup_logging
+from core.paths import (
+    init_app, is_inside_runtime_dir,
+    CONFIG_FILE, SIGNATURES_FILE, QUARANTINE_DIR,
 )
-from core.quarantine import isolate_file, QUARANTINE_DIR
+from core.quarantine import isolate_file
 from core.memory import scan_running_processes
-from core.persistence import audit_registry
+from core.persistence import audit_registry, extract_binary_path
 from core.virustotal import check_virustotal_hash
 from core.updater import update_signatures_from_cloud
 from core.reporter import generate_html_report
 from core.tray import SystemTrayManager
 from core.context_menu import register_context_menu, unregister_context_menu
 
-SIGNATURES_FILE = os.path.join("data", "signatures.json")
-CONFIG_FILE = os.path.join("data", "config.json")
+logger = logging.getLogger(__name__)
 
 
 class LiveProtectionHandler(FileSystemEventHandler):
-    def __init__(self, app_instance):
+    """Encola eventos del sistema de archivos y los procesa aparte.
+
+    - No bloquea al observador con sleeps ni con hashing (antes se dormían
+      0,3 s dentro del callback y se perdían eventos).
+    - Deduplica por ruta con ventana de tiempo.
+    - Escucha creación, modificación, cierre y renombrado: renombrar un .exe a
+      .txt y volver a .exe ya no evade la detección.
+    - Espera a que el archivo termine de escribirse antes de escanearlo.
+    """
+
+    def __init__(self, app_instance, dedupe_seconds=2.0):
         super().__init__()
         self.app = app_instance
-        self.last_scanned = {}
+        self.dedupe_seconds = dedupe_seconds
+        self._queue = queue.Queue()
+        self._recent = {}
+        self._recent_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._worker = threading.Thread(
+            target=self._run, name="killvirus-live", daemon=True
+        )
 
+    # --- ciclo de vida ---
+    def start(self):
+        if not self._worker.is_alive():
+            self._worker.start()
+
+    def stop(self):
+        self._stop.set()
+        self._queue.put(None)
+
+    # --- callbacks de watchdog ---
     def on_created(self, event):
-        if not event.is_directory:
-            self.process_file(event.src_path)
+        self._handle(event.src_path, event.is_directory)
 
     def on_modified(self, event):
-        if not event.is_directory:
-            self.process_file(event.src_path)
+        self._handle(event.src_path, event.is_directory)
 
-    def process_file(self, filepath):
-        now = time.time()
-        if filepath in self.last_scanned and (now - self.last_scanned[filepath]) < 1.5:
+    def on_moved(self, event):
+        self._handle(event.dest_path, event.is_directory)
+
+    def on_closed(self, event):
+        self._handle(event.src_path, event.is_directory)
+
+    def _handle(self, filepath, is_directory):
+        if is_directory or not filepath:
             return
-        self.last_scanned[filepath] = now
+        if os.path.splitext(filepath)[1].lower() not in TARGET_EXTENSIONS:
+            return
+        if self._is_duplicate(filepath):
+            return
+        self._queue.put(filepath)
 
-        ext = os.path.splitext(filepath)[1].lower()
-        if ext in TARGET_EXTENSIONS:
-            time.sleep(0.3)
-            self.app.scan_single_file_live(filepath)
+    def _is_duplicate(self, filepath):
+        now = time.monotonic()
+        with self._recent_lock:
+            last = self._recent.get(filepath)
+            if last is not None and (now - last) < self.dedupe_seconds:
+                return True
+            self._recent[filepath] = now
+            # Poda para que el diccionario no crezca sin límite.
+            if len(self._recent) > 4096:
+                cutoff = now - 60
+                self._recent = {p: t for p, t in self._recent.items() if t >= cutoff}
+        return False
+
+    def _run(self):
+        while not self._stop.is_set():
+            filepath = self._queue.get()
+            if filepath is None:
+                break
+            try:
+                if is_inside_runtime_dir(filepath):
+                    continue
+                self._wait_until_stable(filepath)
+                self.app.scan_single_file_live(filepath)
+            except Exception:
+                continue
+
+    @staticmethod
+    def _wait_until_stable(filepath, attempts=6, delay=0.25):
+        """Espera a que el archivo esté completo y se pueda abrir."""
+        last_size = -1
+        for _ in range(attempts):
+            try:
+                size = os.path.getsize(filepath)
+                with open(filepath, "rb"):
+                    pass
+                if size == last_size and size >= 0:
+                    return
+                last_size = size
+            except OSError:
+                pass
+            time.sleep(delay)
 
 
 class MainWindow(ctk.CTk):
     def __init__(self):
         super().__init__()
 
+        # Logging a archivo (idempotente si ya lo configuró app.pyw).
+        setup_logging()
+        install_excepthook()
+
+        # Crea/valida las carpetas de datos antes de leer configuración.
+        init_app()
+
         self.config = self.load_config()
         appearance = self.config.get("appearance_mode", "Oscuro")
         ctk.set_appearance_mode("Dark" if appearance == "Oscuro" else "Light")
 
-        self.geometry("1100x720")
-        self.minsize(980, 640)
-        self.configure(fg_color=COLOR_BG)
-        self.title("KILLVirus - NextGen Forensics & EDR")
+        # Centrado exacto en pantalla (1040x690)
+        app_width = 1040
+        app_height = 690
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = max(0, int((screen_width - app_width) / 2))
+        y = max(0, int((screen_height - app_height) / 2))
+        self.geometry(f"{app_width}x{app_height}+{x}+{y}")
+        self.minsize(980, 620)
 
-        # Icono de aplicación
-        icon_path = os.path.join("assets", "icon.ico")
-        if os.path.exists(icon_path):
+        self.configure(fg_color=COLOR_BG)
+        self.title(f"{__app_name__} - NextGen Forensics & Local EDR v{__version__}")
+
+        # Cargar icono por RUTA ABSOLUTA calculada desde __file__
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        ico_path = os.path.join(base_dir, "assets", "icon.ico")
+        png_path = os.path.join(base_dir, "assets", "icon.png")
+
+        if os.path.exists(ico_path):
             try:
-                self.iconbitmap(icon_path)
+                self.iconbitmap(ico_path)
+            except Exception:
+                pass
+
+        if os.path.exists(png_path):
+            try:
+                img = tk.PhotoImage(file=png_path)
+                self.iconphoto(False, img)
             except Exception:
                 pass
 
@@ -91,10 +195,17 @@ class MainWindow(ctk.CTk):
         self.exclusions = set(self.config.get("exclusions", []))
 
         self.observer = None
+        self.live_handler = None
         self.is_monitoring = False
         self.tray = None
 
         self._build_layout()
+        if not HAS_YARA:
+            self.log(
+                "[!] Motor YARA no disponible en este equipo "
+                f"({UNAVAILABLE_REASON}). Se usan firmas SHA-256, heurísticas y análisis PE; "
+                "las reglas de data/rules.yar quedan inactivas."
+            )
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         if len(sys.argv) > 1:
@@ -170,7 +281,15 @@ class MainWindow(ctk.CTk):
             self.sidebar, text=f"Firmas CTI: {len(self.signatures)}",
             font=ctk.CTkFont(family=FONT_FAMILY, size=11), text_color=COLOR_TEXT_MUTED
         )
-        self.lbl_sig_count.grid(row=9, column=0, padx=20, pady=(0, 16), sticky="w")
+        self.lbl_sig_count.grid(row=9, column=0, padx=20, pady=(0, 4), sticky="w")
+
+        self.lbl_yara_status = ctk.CTkLabel(
+            self.sidebar,
+            text="Motor YARA: activo" if HAS_YARA else "Motor YARA: no disponible",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
+            text_color=COLOR_TEXT_MUTED if HAS_YARA else COLOR_WARNING,
+        )
+        self.lbl_yara_status.grid(row=10, column=0, padx=20, pady=(0, 16), sticky="w")
 
         # ---------------- CONTENEDOR PRINCIPAL ----------------
         self.container = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -363,9 +482,26 @@ class MainWindow(ctk.CTk):
         self.entry_vt_key.pack(side="left", fill="x", expand=True, padx=(0, 8))
         ctk.CTkButton(box_api, text="Guardar Clave", width=110, height=36, command=self.save_api_key).pack(side="left")
 
+        # ThreatFox (actualización de firmas)
+        card_tf = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
+        card_tf.grid(row=1, column=0, sticky="ew", pady=(0, 16))
+        ctk.CTkLabel(card_tf, text="Auth-Key de abuse.ch (actualización de firmas)", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(16, 6))
+        ctk.CTkLabel(
+            card_tf,
+            text="Gratis en https://auth.abuse.ch/. Sin esta clave, la app funciona igual pero no descarga firmas nuevas.",
+            text_color=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        box_tf = ctk.CTkFrame(card_tf, fg_color="transparent")
+        box_tf.pack(fill="x", padx=16, pady=(0, 16))
+        self.entry_tf_key = ctk.CTkEntry(box_tf, height=36, show="*")
+        self.entry_tf_key.insert(0, self.config.get("threatfox_auth_key", ""))
+        self.entry_tf_key.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(box_tf, text="Guardar Clave", width=110, height=36, command=self.save_threatfox_key).pack(side="left")
+
         # Whitelist / Exclusiones
         card_ex = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
-        card_ex.grid(row=1, column=0, sticky="ew")
+        card_ex.grid(row=2, column=0, sticky="ew")
         ctk.CTkLabel(card_ex, text="Lista Blanca / Exclusiones", font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"), text_color=COLOR_TEXT_PRIMARY).pack(anchor="w", padx=16, pady=(16, 6))
         ctk.CTkLabel(card_ex, text="Las carpetas o rutas especificadas serán ignoradas en todos los escaneos.", text_color=COLOR_TEXT_SECONDARY).pack(anchor="w", padx=16, pady=(0, 10))
 
@@ -408,15 +544,15 @@ class MainWindow(ctk.CTk):
     def open_donation_modal(self):
         modal = ctk.CTkToplevel(self)
         modal.title("☕ Apoyar el Proyecto KILLVirus")
-        modal.geometry("480x360")
+        modal.geometry("480x340")
         modal.resizable(False, False)
         modal.configure(fg_color=COLOR_BG)
         modal.transient(self)
 
         modal.update_idletasks()
         x = self.winfo_x() + (self.winfo_width() // 2) - (480 // 2)
-        y = self.winfo_y() + (self.winfo_height() // 2) - (360 // 2)
-        modal.geometry(f"480x360+{max(0, x)}+{max(0, y)}")
+        y = self.winfo_y() + (self.winfo_height() // 2) - (340 // 2)
+        modal.geometry(f"480x340+{max(0, x)}+{max(0, y)}")
 
         container = ctk.CTkFrame(modal, fg_color=COLOR_CARD, corner_radius=12)
         container.pack(fill="both", expand=True, padx=20, pady=20)
@@ -427,29 +563,29 @@ class MainWindow(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=18, weight="bold"),
             text_color=COLOR_GOLD
         )
-        title_lbl.pack(pady=(20, 10), padx=20)
+        title_lbl.pack(pady=(16, 8), padx=20)
 
         desc_text = (
-            "KILLVirus es una suite de seguridad y análisis forense 100% gratuita "
-            "y de código abierto. Si la herramienta te resulta de utilidad y deseas "
-            "colaborar con su mantenimiento continuo, cualquier contribución es bienvenida."
+            "KILLVirus es una solución EDR y forense 100% gratuita "
+            "y de código abierto. Si la herramienta te resulta útil y deseas "
+            "colaborar con su desarrollo, tu apoyo es muy valioso."
         )
         desc_lbl = ctk.CTkLabel(
             container,
             text=desc_text,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12),
             text_color=COLOR_TEXT_SECONDARY,
-            wraplength=400,
+            wraplength=410,
             justify="center"
         )
-        desc_lbl.pack(pady=(0, 20), padx=20)
+        desc_lbl.pack(pady=(0, 16), padx=20)
 
         btn_cafecito = ctk.CTkButton(
             container,
-            text="☕ Donar en Cafecito (Argentina)",
-            height=38,
+            text="☕ Apoyar en Cafecito (cafecito.app/cristian_dev)",
+            height=36,
             corner_radius=8,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
             fg_color="#eab308",
             text_color="#18181b",
             hover_color="#ca8a04",
@@ -459,31 +595,16 @@ class MainWindow(ctk.CTk):
 
         btn_github = ctk.CTkButton(
             container,
-            text="⭐ Ver Repositorio en GitHub",
-            height=38,
+            text="⭐ Repositorio en GitHub",
+            height=36,
             corner_radius=8,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=11, weight="bold"),
             fg_color=COLOR_ACCENT,
             hover_color=COLOR_ACCENT_HOVER,
             text_color="#ffffff",
             command=lambda: webbrowser.open("https://github.com/CristianNLC/KILLVirus---NextGen-Forensics-Local-EDR")
         )
-        btn_github.pack(fill="x", padx=30, pady=(0, 12))
-
-        btn_close = ctk.CTkButton(
-            container,
-            text="Cerrar",
-            height=32,
-            corner_radius=6,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=11),
-            fg_color="transparent",
-            border_width=1,
-            border_color=COLOR_TEXT_MUTED,
-            text_color=COLOR_TEXT_PRIMARY,
-            hover_color=COLOR_CARD_HOVER,
-            command=modal.destroy
-        )
-        btn_close.pack(padx=30, pady=(0, 15))
+        btn_github.pack(fill="x", padx=30)
 
         modal.grab_set()
         modal.focus_force()
@@ -517,7 +638,9 @@ class MainWindow(ctk.CTk):
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
             try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                # utf-8-sig tolera el BOM que dejan algunos editores (Notepad,
+                # PowerShell) sin romper la carga de exclusiones y claves.
+                with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
                     return json.load(f)
             except Exception:
                 pass
@@ -553,12 +676,7 @@ class MainWindow(ctk.CTk):
             self.entry_path.insert(0, file)
 
     def is_path_excluded(self, path):
-        norm_path = os.path.normpath(path).lower()
-        for excl in self.exclusions:
-            norm_excl = os.path.normpath(excl).lower()
-            if norm_path == norm_excl or norm_path.startswith(norm_excl + os.sep):
-                return True
-        return False
+        return is_excluded(path, list(self.exclusions))
 
     # ================= ESCÁNER DE DISCO CON CONSOLA LIMPIA Y ETA =================
     def start_scan_thread(self):
@@ -584,6 +702,8 @@ class MainWindow(ctk.CTk):
                 filepath = os.path.join(root, file)
                 if self.is_path_excluded(filepath):
                     continue
+                if is_inside_runtime_dir(filepath):
+                    continue
                 ext = os.path.splitext(file)[1].lower()
                 if ext in TARGET_EXTENSIONS:
                     target_files.append(filepath)
@@ -597,55 +717,25 @@ class MainWindow(ctk.CTk):
 
         for idx, filepath in enumerate(target_files, 1):
             file = os.path.basename(filepath)
-            ext = os.path.splitext(file)[1].lower()
             scanned += 1
 
             self.after(0, lambda c=scanned, t=total_files, fp=filepath: self.progress_card.update_progress(c, t, fp))
 
-            det_name, det_reason = None, None
-            f_hash = calculate_sha256(filepath)
-
-            # Hashes SHA-256
-            if f_hash and f_hash in self.signatures:
-                det_reason = "Firma SHA-256"
-                det_name = self.signatures[f_hash].get("malware_name", "Malware")
-
-            # Reglas YARA
-            if not det_name:
-                y_id, y_desc = analyze_yara(filepath)
-                if y_id:
-                    det_reason = f"YARA ({y_id})"
-                    det_name = y_desc
-
-            # Heurística
-            if not det_name:
-                h_id, h_desc = analyze_heuristics(filepath)
-                if h_id:
-                    det_reason = f"Heurística ({h_id})"
-                    det_name = h_desc
-
-            # Análisis PE
-            if not det_name:
-                pe_id, pe_desc = analyze_binary_pe(filepath)
-                if pe_id:
-                    det_reason = f"Análisis PE ({pe_id})"
-                    det_name = pe_desc
-
-            # Filtro Authenticode
-            if det_name and ext in {".exe", ".dll", ".sys"}:
-                is_signed, sign_msg = check_authenticode(filepath)
-                if is_signed:
-                    det_name = None
-
-            # SOLO registrar si hay DETECCIÓN de amenaza
-            if det_name:
-                self.log(f"[!] DETECCIÓN: {file} | {det_reason}: {det_name}")
-                qp = isolate_file(filepath)
+            detection = scan_file(filepath, self.signatures)
+            if detection:
+                f_hash = detection.sha256 or calculate_sha256(filepath)
+                self.log(f"[!] DETECCIÓN: {file} | {detection.reason}: {detection.name}")
+                qp = isolate_file(
+                    filepath,
+                    reason=f"{detection.reason}: {detection.name}",
+                    sha256=f_hash,
+                )
                 if qp:
                     self.log(f"    [+] Aislado en cuarentena: {os.path.basename(qp)}")
                 threats.append({
                     "file": file, "path": filepath, "hash": f_hash or "N/A",
-                    "reason": f"{det_reason}: {det_name}", "quarantined": qp is not None
+                    "reason": f"{detection.reason}: {detection.name}",
+                    "quarantined": qp is not None
                 })
 
         self.log("-" * 50)
@@ -685,6 +775,8 @@ class MainWindow(ctk.CTk):
             self.observer = Observer()
             self.observer.schedule(handler, folder, recursive=True)
             self.observer.start()
+            handler.start()
+            self.live_handler = handler
 
             self.is_monitoring = True
             self.btn_live.configure(text="Protección en Tiempo Real: Activa", fg_color=COLOR_SUCCESS, hover_color=COLOR_SUCCESS_HOVER)
@@ -695,6 +787,9 @@ class MainWindow(ctk.CTk):
                 self.observer.stop()
                 self.observer.join()
                 self.observer = None
+            if self.live_handler:
+                self.live_handler.stop()
+                self.live_handler = None
             self.is_monitoring = False
             self.btn_live.configure(text="Protección en Tiempo Real: Inactiva", fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_HOVER)
             self.set_status("Supervisión detenida.")
@@ -702,45 +797,24 @@ class MainWindow(ctk.CTk):
 
     def scan_single_file_live(self, filepath):
         if not os.path.isfile(filepath) or self.is_path_excluded(filepath):
-            return
+            return None
+        if is_inside_runtime_dir(filepath):
+            return None
+
+        detection = scan_file(filepath, self.signatures)
+        if detection is None:
+            return None
 
         filename = os.path.basename(filepath)
-        ext = os.path.splitext(filepath)[1].lower()
-        f_hash = calculate_sha256(filepath)
-        det_name, det_reason = None, None
-
-        if f_hash and f_hash in self.signatures:
-            det_reason = "Firma SHA-256"
-            det_name = self.signatures[f_hash].get("malware_name", "Malware")
-
-        if not det_name:
-            y_id, y_desc = analyze_yara(filepath)
-            if y_id:
-                det_reason = f"YARA ({y_id})"
-                det_name = y_desc
-
-        if not det_name:
-            h_id, h_desc = analyze_heuristics(filepath)
-            if h_id:
-                det_reason = f"Heurística ({h_id})"
-                det_name = h_desc
-
-        if not det_name:
-            pe_id, pe_desc = analyze_binary_pe(filepath)
-            if pe_id:
-                det_reason = f"Análisis PE ({pe_id})"
-                det_name = pe_desc
-
-        if det_name and ext in {".exe", ".dll", ".sys"}:
-            is_signed, sign_msg = check_authenticode(filepath)
-            if is_signed:
-                return
-
-        if det_name:
-            self.log(f"\n[!] ALERTA EN VIVO: {filename} | {det_reason}: {det_name}")
-            qp = isolate_file(filepath)
-            if qp:
-                self.log(f"    [+] Aislado en cuarentena: {os.path.basename(qp)}")
+        self.log(f"\n[!] ALERTA EN VIVO: {filename} | {detection.reason}: {detection.name}")
+        qp = isolate_file(
+            filepath,
+            reason=f"{detection.reason}: {detection.name}",
+            sha256=detection.sha256,
+        )
+        if qp:
+            self.log(f"    [+] Aislado en cuarentena: {os.path.basename(qp)}")
+        return detection
 
     # ================= MÓDULOS DEL SISTEMA: ESCÁNER RAM AUTOMÁTICO =================
     def start_procs_thread(self):
@@ -800,16 +874,20 @@ class MainWindow(ctk.CTk):
 
         verified = []
         for item in flagged:
-            path = item.get("command", "")
-            if os.path.isfile(path):
-                is_signed, _ = check_authenticode(path)
-                if is_signed:
+            # Una firma válida solo descarta indicios débiles (ruta inusual /
+            # heurística). Un match de hash sigue siendo malware aunque el
+            # binario esté firmado (certificado robado o LOLBin firmado).
+            if not item.get("signature_match"):
+                path = extract_binary_path(item.get("command", ""))
+                if path and os.path.isfile(path) and check_authenticode(path)[0]:
                     continue
             verified.append(item)
 
         for item in verified:
             self.log(f"[!] ENTRADA SOSPECHOSA: [{item['label']}] {item['name']}")
             self.log(f"    Ejecutable: {item['command']}")
+            for reason in item.get("reasons", []):
+                self.log(f"    Motivo: {reason}")
 
         self.log("-" * 50)
         self.log(f"Persistencia finalizada: {total} examinadas, {len(verified)} sospechosas.")
@@ -862,7 +940,10 @@ class MainWindow(ctk.CTk):
         self.log("[*] Sincronizando firmas desde ThreatFox...")
         self.after(0, lambda: self.progress_card.start("Sincronizando firmas desde ThreatFox...", 100))
 
-        ok, res, new_sigs = update_signatures_from_cloud(self.signatures)
+        ok, res, new_sigs = update_signatures_from_cloud(
+            self.signatures,
+            auth_key=self.config.get("threatfox_auth_key", ""),
+        )
         if ok:
             self.signatures = new_sigs
             self.after(0, lambda: self.lbl_sig_count.configure(text=f"Firmas CTI: {len(self.signatures)}"))
@@ -870,6 +951,11 @@ class MainWindow(ctk.CTk):
             self.after(0, lambda: show_alert(self, "Actualización Exitosa", f"Se incorporaron {res} nuevas firmas de malware.", alert_type="success"))
         else:
             self.log(f"[!] Error de sincronización: {res}")
+            self.after(0, lambda: show_alert(
+                self, "No se pudo actualizar",
+                f"{res}\n\nPodés obtener un Auth-Key gratuito en https://auth.abuse.ch/ y guardarlo en Configuración.",
+                alert_type="warning"
+            ))
 
         self.after(0, lambda: self.progress_card.set_complete("Actualización de firmas completada", len(self.signatures)))
 
@@ -998,6 +1084,12 @@ class MainWindow(ctk.CTk):
         self.save_config()
         show_alert(self, "Configuración", "API Key de VirusTotal guardada correctamente.", alert_type="success")
 
+    def save_threatfox_key(self):
+        key = self.entry_tf_key.get().strip()
+        self.config["threatfox_auth_key"] = key
+        self.save_config()
+        show_alert(self, "Configuración", "Auth-Key de abuse.ch guardada correctamente.", alert_type="success")
+
     def add_exclusion_folder(self):
         folder = filedialog.askdirectory()
         if folder:
@@ -1036,6 +1128,9 @@ class MainWindow(ctk.CTk):
     def quit_app(self):
         if self.tray:
             self.tray.stop()
+        if self.live_handler:
+            self.live_handler.stop()
+            self.live_handler = None
         if self.observer and self.is_monitoring:
             self.observer.stop()
             self.observer.join()

@@ -41,15 +41,15 @@ class HelpModal(ctk.CTkToplevel):
              "reglas de patrones YARA, análisis sintáctico de encabezados PE, motor heurístico y "
              "filtrado por firma digital Authenticode para evitar falsos positivos."),
 
-            ("🛡️ Protección en Tiempo Real (PRO)",
+            ("🛡️ Protección en Tiempo Real",
              "Monitorea en segundo plano cualquier archivo creado o modificado en los directorios seleccionados. "
              "Al detectar un archivo ejecutable nuevo, lo escanea instantáneamente antes de que pueda dañar el sistema."),
 
-            ("🧠 Análisis de Memoria RAM activa (PRO)",
+            ("🧠 Análisis de Memoria RAM activa",
              "Inspecciona todos los procesos ejecutándose en la RAM del sistema. "
              "Calcula el hash de los binarios cargados y termina de inmediato cualquier proceso maligno detectado."),
 
-            ("🔑 Auditoría de Persistencia en el Registro (PRO)",
+            ("🔑 Auditoría de Persistencia en el Registro",
              "Examina las claves de auto-inicio del Registro de Windows (HKEY_CURRENT_USER y HKEY_LOCAL_MACHINE\\Run/RunOnce). "
              "Filtra entradas sospechosas y verifica la firma digital Authenticode de cada programa al inicio."),
 
@@ -58,8 +58,8 @@ class HelpModal(ctk.CTkToplevel):
              "para saber si más de 70 motores antivirus lo han catalogado como dañino."),
 
             ("📦 Gestor de Cuarentena",
-             "Aísla de forma segura las amenazas detectadas en un contenedor encriptado (.quarantine), "
-             "impidiendo su ejecución pero permitiendo restaurar el archivo si es un falso positivo o eliminarlo definitivamente.")
+             "Aísla las amenazas detectadas en una carpeta contenedora (.quarantine), renombrando el archivo para "
+             "impedir su ejecución y permitiendo restaurarlo si es un falso positivo o eliminarlo definitivamente.")
         ]
 
         for title, desc in features:

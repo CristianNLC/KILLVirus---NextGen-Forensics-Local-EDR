@@ -1,0 +1,39 @@
+# Metadatos y configuración de herramientas.
+#
+# Este proyecto NO se instala como paquete: se ejecuta desde el repositorio
+# (`python app.pyw`) o se empaqueta con PyInstaller. Las dependencias de
+# ejecución viven en `requirements.txt` para no duplicar listas.
+
+[project]
+name = "killvirus"
+version = "2.1.0"
+description = "EDR local y toolkit forense para Windows, 100% offline"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "CristianNLC" }]
+keywords = ["antivirus", "edr", "forensics", "security", "windows", "yara"]
+classifiers = [
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-include = ["*.pyw"]
+extend-exclude = ["build", "dist", "dist_installer", "data", "assets"]
+
+[tool.ruff.lint]
+# Solo errores reales (imports/variables sin uso, nombres indefinidos, sintaxis).
+# El estilo se irá incorporando por módulo en las siguientes fases.
+select = ["F", "E9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

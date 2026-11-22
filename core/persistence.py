@@ -33,6 +33,7 @@ def audit_registry(signatures):
                     raw_path = extract_binary_path(val_str)
                     is_suspicious = False
                     reasons = []
+                    signature_match = False
 
                     lower_val = val_str.lower()
                     for kw in suspicious_keywords:
@@ -44,6 +45,7 @@ def audit_registry(signatures):
                         f_hash = calculate_sha256(raw_path)
                         if f_hash and f_hash in signatures:
                             is_suspicious = True
+                            signature_match = True
                             reasons.append(f"Firma: {signatures[f_hash].get('malware_name')}")
                         else:
                             h_id, h_desc = analyze_heuristics(raw_path)
@@ -52,7 +54,13 @@ def audit_registry(signatures):
                                 reasons.append(f"Heurística: {h_desc}")
 
                     if is_suspicious:
-                        flagged_results.append({"label": label, "name": name, "command": val_str, "reasons": reasons})
+                        flagged_results.append({
+                            "label": label,
+                            "name": name,
+                            "command": val_str,
+                            "reasons": reasons,
+                            "signature_match": signature_match,
+                        })
         except Exception:
             continue
 

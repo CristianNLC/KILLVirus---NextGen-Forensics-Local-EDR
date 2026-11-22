@@ -2,7 +2,7 @@ import os
 import webbrowser
 from datetime import datetime
 
-REPORTS_DIR = os.path.join(os.getcwd(), "reportes")
+from core.paths import REPORTS_DIR, ensure_runtime_dirs
 
 def generate_html_report(target_path, total_scanned, threats_found):
     """
@@ -10,7 +10,7 @@ def generate_html_report(target_path, total_scanned, threats_found):
     threats_found debe ser una lista de diccionarios:
     [{'file': '...', 'path': '...', 'hash': '...', 'reason': '...', 'quarantined': True/False}]
     """
-    os.makedirs(REPORTS_DIR, exist_ok=True)
+    ensure_runtime_dirs()
     timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_filename = f"reporte_seguridad_{file_timestamp}.html"

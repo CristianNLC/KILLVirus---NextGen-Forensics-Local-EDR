@@ -24,8 +24,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; Binario compilado con PyInstaller
 Source: "dist\KILLVirus_v2.exe"; DestDir: "{app}"; Flags: ignoreversion
-; Carpetas de soporte requeridas en ejecución
-Source: "data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Carpetas de soporte requeridas en ejecución.
+; Excluye estado local del desarrollador para no repartir configuración personal.
+Source: "data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "config.json,exclusions.json,*.example"
 Source: "assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

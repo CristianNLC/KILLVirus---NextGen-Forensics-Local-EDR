@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest ruff
+
+      - name: Lint (errores reales)
+        run: ruff check .
+
+      - name: Compilar módulos
+        run: python -m compileall -q core ui scripts app.pyw
+
+      - name: Tests unitarios
+        run: python -m pytest
+
+      - name: Autocomprobación de integración
+        run: python scripts/selftest.py

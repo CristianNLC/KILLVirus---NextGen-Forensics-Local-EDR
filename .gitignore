@@ -2,7 +2,10 @@
 build/
 dist/
 dist_installer/
+# Los specs de release se versionan en packaging/; los specs generados localmente
+# en la raíz se ignoran.
 *.spec
+!packaging/*.spec
 
 # Entornos virtuales y dependencias
 venv/
@@ -13,8 +16,16 @@ __pycache__/
 # Archivos de cuarentena y reportes locales
 cuarentena/
 reportes/
+logs/
+*.quarantine
+*.quarantine.meta
+reporte_escaneo.txt
 
 # Claves locales, entorno y configuraciones personales
 .env
 .env.local
+.env.*
+!.env.example
 data/config.json
+data/license.json
+data/exclusions.json

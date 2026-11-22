@@ -4,11 +4,6 @@
     "threat_type": "Test",
     "severity": "Low"
   },
-  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": {
-    "malware_name": "Empty-File-Alert",
-    "threat_type": "Anomaly",
-    "severity": "Informational"
-  },
   "ccefe9acb00af5bfc11701b390e8e0dac713ab289a516be091a71a3a0a63a9ba": {
     "malware_name": "win.wannacryptor",
     "threat_type": "sha256_hash",
