@@ -45,6 +45,7 @@ from core.reporter import generate_html_report
 from core.tray import SystemTrayManager
 from core.context_menu import register_context_menu, unregister_context_menu
 from core.monitor.watcher import LiveProtectionManager
+from core.canary import CanaryManager
 from core.startup_audit import list_startup_entries, list_console_processes, terminate_process
 from services.scan_service import ScanService
 
@@ -211,6 +212,10 @@ class MainWindow(ctk.CTk):
         self.is_monitoring = False
         self.tray = None
 
+        # Canarios anti-ransomware.
+        self.canary_manager = None
+        self.canary_alerts = []
+
         self._build_layout()
         if not HAS_YARA:
             self.log(
@@ -237,7 +242,7 @@ class MainWindow(ctk.CTk):
         # ---------------- BARRA LATERAL (SIDEBAR) ----------------
         self.sidebar = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=COLOR_SIDEBAR)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(9, weight=1)
+        self.sidebar.grid_rowconfigure(10, weight=1)
 
         brand_lbl = ctk.CTkLabel(
             self.sidebar, text="⚔️ KILLVirus",
@@ -251,6 +256,7 @@ class MainWindow(ctk.CTk):
         self.btn_nav_quar = self._create_sidebar_btn("Cuarentena", 3, self.show_quarantine_view)
         self.btn_nav_config = self._create_sidebar_btn("Configuración", 4, self.show_config_view)
         self.btn_nav_startup = self._create_sidebar_btn("Inicio del Sistema", 5, self.show_startup_view)
+        self.btn_nav_canary = self._create_sidebar_btn("🛡️ Canarios Anti-Ransomware", 6, self.show_canary_view)
 
         # Botón de Ayuda (?)
         self.btn_help = ctk.CTkButton(
@@ -260,11 +266,11 @@ class MainWindow(ctk.CTk):
             text_color=COLOR_TEXT_PRIMARY, anchor="w",
             command=self.open_help_modal
         )
-        self.btn_help.grid(row=6, column=0, padx=12, pady=(12, 4), sticky="ew")
+        self.btn_help.grid(row=7, column=0, padx=12, pady=(12, 4), sticky="ew")
 
         # Selector de Tema (Modo Oscuro / Claro)
         theme_box = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        theme_box.grid(row=8, column=0, padx=16, pady=(0, 10), sticky="ew")
+        theme_box.grid(row=9, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         lbl_theme = ctk.CTkLabel(
             theme_box, text="Tema:",
@@ -288,7 +294,7 @@ class MainWindow(ctk.CTk):
             fg_color="#eab308", text_color="#18181b", hover_color="#ca8a04",
             command=self.open_donation_modal
         )
-        self.btn_donate.grid(row=9, column=0, padx=16, pady=(0, 10), sticky="ew")
+        self.btn_donate.grid(row=10, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         self.lbl_sig_count = ctk.CTkLabel(
             self.sidebar, text=f"Firmas CTI: {len(self.signature_store)}",
@@ -316,6 +322,7 @@ class MainWindow(ctk.CTk):
         self._init_quarantine_view()
         self._init_config_view()
         self._init_startup_view()
+        self._init_canary_view()
 
         self.show_scanner_view()
 
@@ -330,7 +337,7 @@ class MainWindow(ctk.CTk):
         return btn
 
     def _set_active_tab(self, active_btn):
-        for btn in [self.btn_nav_scanner, self.btn_nav_tools, self.btn_nav_quar, self.btn_nav_config, self.btn_nav_startup]:
+        for btn in [self.btn_nav_scanner, self.btn_nav_tools, self.btn_nav_quar, self.btn_nav_config, self.btn_nav_startup, self.btn_nav_canary]:
             btn.configure(fg_color=COLOR_ACCENT if btn == active_btn else "transparent")
             btn.configure(text_color="#ffffff" if btn == active_btn else COLOR_TEXT_PRIMARY)
 
@@ -670,6 +677,10 @@ class MainWindow(ctk.CTk):
         self.refresh_startup_table()
         self.refresh_console_table()
 
+    def show_canary_view(self):
+        self._switch_view("canary", self.btn_nav_canary)
+        self.refresh_canary_view()
+
     def refresh_startup_table(self):
         self.tree_startup.delete(*self.tree_startup.get_children())
         try:
@@ -809,6 +820,188 @@ class MainWindow(ctk.CTk):
         pid = item["values"][0]
         name = item["values"][1]
         self._confirm_terminate(pid, name, self.refresh_console_table)
+
+    # ================= VISTA 6: CANARIOS ANTI-RANSOMWARE =================
+    def _init_canary_view(self):
+        v = ctk.CTkFrame(self.container, fg_color="transparent")
+        v.grid_columnconfigure(0, weight=1)
+        v.grid_rowconfigure(2, weight=1)
+
+        ctk.CTkLabel(
+            v, text="🛡️ Canarios Anti-Ransomware",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
+        ctk.CTkLabel(
+            v,
+            text="Archivos cebo en carpetas sensibles del usuario. Si se modifican, renombran o borran, "
+                 "es fuerte indicio de ransomware en acción.",
+            text_color=COLOR_TEXT_SECONDARY,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+        ).grid(row=1, column=0, padx=20, pady=(0, 10), sticky="w")
+
+        # --- Botones de acción ---
+        btn_box = ctk.CTkFrame(v, fg_color="transparent")
+        btn_box.grid(row=2, column=0, padx=20, pady=(0, 10), sticky="ew")
+
+        self.btn_canary_install = ctk.CTkButton(
+            btn_box, text="Instalar Canarios", width=140,
+            command=self.install_canaries,
+        )
+        self.btn_canary_install.pack(side="left", padx=(0, 10))
+
+        self.btn_canary_verify = ctk.CTkButton(
+            btn_box, text="Verificar Integridad", width=140,
+            command=self.verify_canaries,
+        )
+        self.btn_canary_verify.pack(side="left", padx=(0, 10))
+
+        self.btn_canary_monitor = ctk.CTkButton(
+            btn_box, text="Activar Monitoreo", width=140,
+            command=self.toggle_canary_monitoring,
+        )
+        self.btn_canary_monitor.pack(side="left")
+
+        # --- Tabla de canarios ---
+        tree_frame = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
+        tree_frame.grid(row=3, column=0, padx=20, pady=(0, 10), sticky="nsew")
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+
+        self.tree_canary = ttk.Treeview(
+            tree_frame,
+            columns=("name", "path", "status", "hash"),
+            show="headings",
+            height=10,
+        )
+        for col, txt, w in [
+            ("name", "Nombre", 150),
+            ("path", "Ruta", 400),
+            ("status", "Estado", 100),
+            ("hash", "SHA-256", 80),
+        ]:
+            self.tree_canary.heading(col, text=txt)
+            self.tree_canary.column(col, width=w, stretch=(col == "path"))
+        self.tree_canary.grid(row=0, column=0, sticky="nsew")
+
+        scroll_canary = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree_canary.yview)
+        scroll_canary.grid(row=0, column=1, sticky="ns")
+        self.tree_canary.configure(yscrollcommand=scroll_canary.set)
+
+        # --- Tabla de alertas ---
+        ctk.CTkLabel(
+            v, text="Alertas de Canario",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).grid(row=4, column=0, padx=20, pady=(16, 4), sticky="w")
+
+        alert_frame = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
+        alert_frame.grid(row=5, column=0, padx=20, pady=(0, 20), sticky="nsew")
+        alert_frame.grid_columnconfigure(0, weight=1)
+        alert_frame.grid_rowconfigure(0, weight=1)
+        v.grid_rowconfigure(5, weight=1)
+
+        self.tree_canary_alerts = ttk.Treeview(
+            alert_frame,
+            columns=("timestamp", "name", "event", "process"),
+            show="headings",
+            height=6,
+        )
+        for col, txt, w in [
+            ("timestamp", "Fecha/Hora", 160),
+            ("name", "Canario", 150),
+            ("event", "Evento", 100),
+            ("process", "Proceso", 200),
+        ]:
+            self.tree_canary_alerts.heading(col, text=txt)
+            self.tree_canary_alerts.column(col, width=w, stretch=(col == "process"))
+        self.tree_canary_alerts.grid(row=0, column=0, sticky="nsew")
+
+        scroll_alerts = ttk.Scrollbar(alert_frame, orient="vertical", command=self.tree_canary_alerts.yview)
+        scroll_alerts.grid(row=0, column=1, sticky="ns")
+        self.tree_canary_alerts.configure(yscrollcommand=scroll_alerts.set)
+
+        self.views["canary"] = v
+
+    def refresh_canary_view(self):
+        self.tree_canary.delete(*self.tree_canary.get_children())
+        if not self.canary_manager:
+            self.tree_canary.insert("", "end", values=("—", "No instalados", "—", ""))
+            return
+        results = self.canary_manager.verify()
+        for p in self.canary_manager.canary_paths:
+            name = os.path.basename(p)
+            ok = results.get(p, False)
+            status = "OK" if ok else "⚠️ ALTERADO"
+            h = self.canary_manager._hashes.get(p, "")[:16] + "..."
+            self.tree_canary.insert(
+                "", "end",
+                values=(name, p, status, h),
+                tags=("alert",) if not ok else (),
+            )
+        self.tree_canary.tag_configure("alert", foreground=COLOR_DANGER)
+
+        # Alertas
+        self.tree_canary_alerts.delete(*self.tree_canary_alerts.get_children())
+        for a in self.canary_alerts:
+            proc = a.process_name or a.process_exe or "desconocido"
+            self.tree_canary_alerts.insert(
+                "", "end",
+                values=(a.timestamp, a.canary_name, a.event, proc),
+            )
+
+    def install_canaries(self):
+        if not self.canary_manager:
+            self.canary_manager = CanaryManager(on_alert=self._on_canary_alert)
+        installed = self.canary_manager.install()
+        self.log(f"[✓] Canarios instalados: {len(installed)} archivos")
+        self.refresh_canary_view()
+
+    def verify_canaries(self):
+        if not self.canary_manager or not self.canary_manager.canary_paths:
+            show_alert(self, "Atención", "Primero instalá los canarios.", alert_type="warning")
+            return
+        results = self.canary_manager.verify()
+        altered = [p for p, ok in results.items() if not ok]
+        if altered:
+            self.log(f"[!] CANARIOS ALTERADOS: {len(altered)} archivo(s) modificado(s)")
+            for p in altered:
+                self.log(f"    - {os.path.basename(p)}: {p}")
+            show_alert(
+                self, "Alerta de Ransomware",
+                f"Se detectaron {len(altered)} canario(s) alterado(s). "
+                "Esto puede indicar cifrado de archivos en curso.",
+                alert_type="warning",
+            )
+        else:
+            self.log("[✓] Todos los canarios están íntegros")
+            show_alert(self, "Canarios OK", "Todos los archivos canario están íntegros.", alert_type="success")
+        self.refresh_canary_view()
+
+    def toggle_canary_monitoring(self):
+        if not self.canary_manager:
+            show_alert(self, "Atención", "Primero instalá los canarios.", alert_type="warning")
+            return
+        if self.canary_manager._thread and self.canary_manager._thread.is_alive():
+            self.canary_manager.stop_monitoring()
+            self.btn_canary_monitor.configure(text="Activar Monitoreo", fg_color=COLOR_ACCENT)
+            self.log("[i] Monitoreo de canarios detenido")
+        else:
+            self.canary_manager.start_monitoring()
+            self.btn_canary_monitor.configure(text="Detener Monitoreo", fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_HOVER)
+            self.log("[i] Monitoreo de canarios activado")
+
+    def _on_canary_alert(self, alert):
+        self.canary_alerts.append(alert)
+        self.log(
+            f"[!] CANARIO ALERT: {alert.canary_name} | {alert.event} | "
+            f"Proceso: {alert.process_name or 'desconocido'} (PID {alert.process_pid})"
+        )
+        # Refrescar si la vista está visible
+        try:
+            self.refresh_canary_view()
+        except Exception:
+            pass
 
     def _switch_view(self, view_name, nav_button):
         for name, frame in self.views.items():
