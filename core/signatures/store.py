@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 from dataclasses import dataclass
 from typing import Iterable, Optional, Protocol, runtime_checkable
 
@@ -117,7 +118,17 @@ class SqliteStore:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._conn = sqlite3.connect(db_path)
+        # check_same_thread=False + lock: la UI consulta el store desde el hilo
+        # de escaneo y desde el hilo principal. WAL + busy_timeout permite que
+        # el servicio de Windows y la interfaz usen la misma base a la vez.
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(db_path, timeout=30.0, check_same_thread=False)
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=30000")
+        except sqlite3.DatabaseError:
+            pass
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS signatures (
@@ -129,40 +140,45 @@ class SqliteStore:
         self._conn.commit()
 
     def lookup(self, file_hash: str) -> Optional[SignatureEntry]:
-        row = self._conn.execute(
-            "SELECT metadata FROM signatures WHERE hash = ?",
-            ((file_hash or "").lower(),),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT metadata FROM signatures WHERE hash = ?",
+                ((file_hash or "").lower(),),
+            ).fetchone()
         if not row:
             return None
         meta = json.loads(row[0])
         return SignatureEntry(hash=(file_hash or "").lower(), **meta)
 
     def __len__(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM signatures").fetchone()
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM signatures").fetchone()
         return int(row[0]) if row else 0
 
     def __contains__(self, file_hash: object) -> bool:
         if not isinstance(file_hash, str):
             return False
-        row = self._conn.execute(
-            "SELECT 1 FROM signatures WHERE hash = ? LIMIT 1",
-            (file_hash.lower(),),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM signatures WHERE hash = ? LIMIT 1",
+                (file_hash.lower(),),
+            ).fetchone()
         return row is not None
 
     def items(self) -> Iterable[tuple[str, SignatureEntry]]:
-        cursor = self._conn.execute("SELECT hash, metadata FROM signatures")
-        for hash_val, metadata in cursor:
+        with self._lock:
+            rows = self._conn.execute("SELECT hash, metadata FROM signatures").fetchall()
+        for hash_val, metadata in rows:
             meta = json.loads(metadata)
             yield hash_val, SignatureEntry(hash=hash_val.lower(), **meta)
 
     def add(self, entry: SignatureEntry) -> None:
-        self._conn.execute(
-            "INSERT OR REPLACE INTO signatures (hash, metadata) VALUES (?, ?)",
-            (entry.hash, json.dumps(entry.to_dict())),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO signatures (hash, metadata) VALUES (?, ?)",
+                (entry.hash, json.dumps(entry.to_dict())),
+            )
+            self._conn.commit()
 
     def merge(self, other: "SignatureStore") -> int:
         added = 0
@@ -176,7 +192,8 @@ class SqliteStore:
         return {h: e.to_dict() for h, e in self.items()}
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
 
 def migrate_from_json(json_path: str, store: SqliteStore) -> int:

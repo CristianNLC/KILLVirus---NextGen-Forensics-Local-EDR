@@ -25,7 +25,7 @@ from core.scanner import (
     analyze_yara,
     check_authenticode,
 )
-from core.signatures import SignatureStore, SignatureEntry
+from core.signatures import SignatureStore
 
 SEV_SIGNATURE = 3
 SEV_YARA = 2

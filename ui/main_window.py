@@ -10,8 +10,7 @@ import webbrowser
 from datetime import datetime
 import tkinter as tk
 import customtkinter as ctk
-from tkinter import filedialog, simpledialog, ttk
-from watchdog.observers import Observer
+from tkinter import filedialog, ttk
 from watchdog.events import FileSystemEventHandler
 
 from ui.theme import (
@@ -26,9 +25,8 @@ from ui.components import (
 )
 
 from core import __app_name__, __version__
-from core.exclusions import is_excluded, parse_exclusions
-from core.scanner import TARGET_EXTENSIONS, calculate_sha256, check_authenticode
-from core.scan_engine import scan_file
+from core.exclusions import is_excluded
+from core.scanner import TARGET_EXTENSIONS, check_authenticode
 from core.signatures import create_signature_store
 from core.yara_scanner import HAS_YARA, UNAVAILABLE_REASON
 from core.logging_setup import install_excepthook, setup_logging
@@ -36,16 +34,16 @@ from core.paths import (
     init_app, is_inside_runtime_dir,
     CONFIG_FILE, SIGNATURES_FILE, SIGNATURES_DB, QUARANTINE_DIR,
 )
-from core.quarantine import isolate_file
-from core.memory import scan_running_processes
-from core.persistence import audit_registry, extract_binary_path
-from core.virustotal import check_virustotal_hash
-from core.updater import update_signatures_from_cloud
-from core.reporter import generate_html_report
+from core.persistence import extract_binary_path
 from core.tray import SystemTrayManager
 from core.context_menu import register_context_menu, unregister_context_menu
 from core.monitor.watcher import LiveProtectionManager
 from core.canary import CanaryManager
+from core.service_control import (
+    elevate_self, is_admin, read_agent_status, service_status,
+)
+from core.autoprotect import protection_status, verify_manifest, write_manifest
+from core.paths import INTEGRITY_FILE
 from core.startup_audit import list_startup_entries, list_console_processes, terminate_process
 from services.scan_service import ScanService
 
@@ -242,7 +240,7 @@ class MainWindow(ctk.CTk):
         # ---------------- BARRA LATERAL (SIDEBAR) ----------------
         self.sidebar = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=COLOR_SIDEBAR)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(10, weight=1)
+        self.sidebar.grid_rowconfigure(11, weight=1)
 
         brand_lbl = ctk.CTkLabel(
             self.sidebar, text="⚔️ KILLVirus",
@@ -257,6 +255,7 @@ class MainWindow(ctk.CTk):
         self.btn_nav_config = self._create_sidebar_btn("Configuración", 4, self.show_config_view)
         self.btn_nav_startup = self._create_sidebar_btn("Inicio del Sistema", 5, self.show_startup_view)
         self.btn_nav_canary = self._create_sidebar_btn("🛡️ Canarios Anti-Ransomware", 6, self.show_canary_view)
+        self.btn_nav_service = self._create_sidebar_btn("🛡️ Servicio y Autoprotección", 7, self.show_service_view)
 
         # Botón de Ayuda (?)
         self.btn_help = ctk.CTkButton(
@@ -266,11 +265,11 @@ class MainWindow(ctk.CTk):
             text_color=COLOR_TEXT_PRIMARY, anchor="w",
             command=self.open_help_modal
         )
-        self.btn_help.grid(row=7, column=0, padx=12, pady=(12, 4), sticky="ew")
+        self.btn_help.grid(row=8, column=0, padx=12, pady=(12, 4), sticky="ew")
 
         # Selector de Tema (Modo Oscuro / Claro)
         theme_box = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        theme_box.grid(row=9, column=0, padx=16, pady=(0, 10), sticky="ew")
+        theme_box.grid(row=12, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         lbl_theme = ctk.CTkLabel(
             theme_box, text="Tema:",
@@ -294,7 +293,7 @@ class MainWindow(ctk.CTk):
             fg_color="#eab308", text_color="#18181b", hover_color="#ca8a04",
             command=self.open_donation_modal
         )
-        self.btn_donate.grid(row=10, column=0, padx=16, pady=(0, 10), sticky="ew")
+        self.btn_donate.grid(row=13, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         self.lbl_sig_count = ctk.CTkLabel(
             self.sidebar, text=f"Firmas CTI: {len(self.signature_store)}",
@@ -323,6 +322,7 @@ class MainWindow(ctk.CTk):
         self._init_config_view()
         self._init_startup_view()
         self._init_canary_view()
+        self._init_service_view()
 
         self.show_scanner_view()
 
@@ -337,7 +337,7 @@ class MainWindow(ctk.CTk):
         return btn
 
     def _set_active_tab(self, active_btn):
-        for btn in [self.btn_nav_scanner, self.btn_nav_tools, self.btn_nav_quar, self.btn_nav_config, self.btn_nav_startup, self.btn_nav_canary]:
+        for btn in [self.btn_nav_scanner, self.btn_nav_tools, self.btn_nav_quar, self.btn_nav_config, self.btn_nav_startup, self.btn_nav_canary, self.btn_nav_service]:
             btn.configure(fg_color=COLOR_ACCENT if btn == active_btn else "transparent")
             btn.configure(text_color="#ffffff" if btn == active_btn else COLOR_TEXT_PRIMARY)
 
@@ -681,6 +681,10 @@ class MainWindow(ctk.CTk):
         self._switch_view("canary", self.btn_nav_canary)
         self.refresh_canary_view()
 
+    def show_service_view(self):
+        self._switch_view("service", self.btn_nav_service)
+        self.refresh_service_view()
+
     def refresh_startup_table(self):
         self.tree_startup.delete(*self.tree_startup.get_children())
         try:
@@ -709,8 +713,6 @@ class MainWindow(ctk.CTk):
         """Calcula nivel de riesgo de una entrada de inicio."""
         path = entry.get("path") or ""
         command = entry.get("command", "").lower()
-        name = entry.get("name", "").lower()
-        source = entry.get("source", "").lower()
 
         # Si el archivo no existe, entrada rota o posible malware ya borrado
         if not entry.get("exists") and path:
@@ -771,7 +773,6 @@ class MainWindow(ctk.CTk):
         item = self.tree_startup.item(sel[0])
         entry_type = item["values"][0]
         name = item["values"][2]
-        command = item["values"][3]
         path = item["values"][4]
 
         if entry_type == "Servicio":
@@ -825,7 +826,7 @@ class MainWindow(ctk.CTk):
     def _init_canary_view(self):
         v = ctk.CTkFrame(self.container, fg_color="transparent")
         v.grid_columnconfigure(0, weight=1)
-        v.grid_rowconfigure(2, weight=1)
+        v.grid_rowconfigure(3, weight=1)
 
         ctk.CTkLabel(
             v, text="🛡️ Canarios Anti-Ransomware",
@@ -982,7 +983,7 @@ class MainWindow(ctk.CTk):
         if not self.canary_manager:
             show_alert(self, "Atención", "Primero instalá los canarios.", alert_type="warning")
             return
-        if self.canary_manager._thread and self.canary_manager._thread.is_alive():
+        if self.canary_manager.is_monitoring:
             self.canary_manager.stop_monitoring()
             self.btn_canary_monitor.configure(text="Activar Monitoreo", fg_color=COLOR_ACCENT)
             self.log("[i] Monitoreo de canarios detenido")
@@ -1002,6 +1003,306 @@ class MainWindow(ctk.CTk):
             self.refresh_canary_view()
         except Exception:
             pass
+
+    # ============ VISTA 7: SERVICIO Y AUTOPROTECCIÓN ============
+    def _init_service_view(self):
+        v = ctk.CTkFrame(self.container, fg_color="transparent")
+        v.grid_columnconfigure(0, weight=1)
+        v.grid_rowconfigure(4, weight=1)
+
+        ctk.CTkLabel(
+            v, text="🛡️ Servicio de Windows y Autoprotección",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).grid(row=0, column=0, padx=20, pady=(20, 6), sticky="w")
+        ctk.CTkLabel(
+            v,
+            text="El agente headless vigila carpetas, canarios y procesos aunque la ventana esté cerrada. "
+                 "La autoprotección endurece las ACLs de firmas y cuarentena y verifica la integridad del código.",
+            text_color=COLOR_TEXT_SECONDARY,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+            wraplength=720, justify="left",
+        ).grid(row=1, column=0, padx=20, pady=(0, 10), sticky="w")
+
+        # --- Tarjeta de estado ---
+        card = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
+        card.grid(row=2, column=0, padx=20, pady=(0, 10), sticky="ew")
+        card.grid_columnconfigure(1, weight=1)
+
+        self.svc_vars = {}
+        rows = [
+            ("service", "Servicio de Windows"),
+            ("admin", "Privilegios actuales"),
+            ("acl", "Autoprotección (ACLs)"),
+            ("agent", "Agente headless"),
+            ("components", "Componentes activos"),
+            ("stats", "Firmas / Detecciones"),
+            ("heartbeat", "Último heartbeat"),
+            ("errors", "Errores del agente"),
+        ]
+        for index, (key, label) in enumerate(rows):
+            ctk.CTkLabel(
+                card, text=f"{label}:",
+                font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+                text_color=COLOR_TEXT_SECONDARY,
+            ).grid(row=index, column=0, padx=(16, 10), pady=3, sticky="w")
+            var = tk.StringVar(value="—")
+            ctk.CTkLabel(
+                card, textvariable=var,
+                font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+                text_color=COLOR_TEXT_PRIMARY,
+            ).grid(row=index, column=1, padx=(0, 16), pady=3, sticky="w")
+            self.svc_vars[key] = var
+
+        # --- Botones ---
+        btn_box = ctk.CTkFrame(v, fg_color="transparent")
+        btn_box.grid(row=3, column=0, padx=20, pady=(0, 10), sticky="ew")
+        btn_row1 = ctk.CTkFrame(btn_box, fg_color="transparent")
+        btn_row1.pack(fill="x", pady=(0, 6))
+        btn_row2 = ctk.CTkFrame(btn_box, fg_color="transparent")
+        btn_row2.pack(fill="x")
+
+        ctk.CTkButton(
+            btn_row1, text="Instalar servicio", width=130,
+            command=self.install_agent_service,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row1, text="Desinstalar", width=110,
+            fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_HOVER,
+            command=self.uninstall_agent_service,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row1, text="Iniciar", width=90,
+            command=self.start_agent_service,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row1, text="Detener", width=90,
+            command=self.stop_agent_service,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row1, text="Actualizar estado", width=140,
+            fg_color=COLOR_CARD, hover_color=COLOR_CARD_HOVER,
+            command=self.refresh_service_view,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            btn_row2, text="Aplicar ACLs de autoprotección", width=210,
+            command=self.apply_autoprotection,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row2, text="Generar manifiesto", width=140,
+            command=self.generate_integrity_manifest,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row2, text="Verificar integridad", width=140,
+            command=self.verify_app_integrity,
+        ).pack(side="left")
+
+        # --- Resultado de las operaciones ---
+        self.txt_service_result = ctk.CTkTextbox(
+            v, height=110, fg_color=COLOR_CARD, corner_radius=12,
+            font=ctk.CTkFont(family="Consolas", size=11),
+        )
+        self.txt_service_result.grid(row=4, column=0, padx=20, pady=(0, 20), sticky="nsew")
+        self.txt_service_result.configure(state="disabled")
+
+        self.views["service"] = v
+
+    # -------------------------------------------------------- estado / acciones
+    def _service_result(self, text):
+        """Escribe una línea en el panel de resultados de la vista."""
+        stamp = datetime.now().strftime("%H:%M:%S")
+        try:
+            self.txt_service_result.configure(state="normal")
+            self.txt_service_result.insert("end", f"[{stamp}] {text}\n")
+            self.txt_service_result.see("end")
+            self.txt_service_result.configure(state="disabled")
+        except Exception:
+            pass
+
+    def refresh_service_view(self):
+        """Consulta SCM, ACLs y heartbeat del agente sin bloquear mucho."""
+        try:
+            status = service_status()
+            if status.get("installed"):
+                state = status.get("state", "DESCONOCIDO")
+                pid = status.get("pid")
+                self.svc_vars["service"].set(
+                    f"{state}" + (f" (PID {pid})" if pid else "")
+                )
+            else:
+                self.svc_vars["service"].set("No instalado")
+        except Exception as exc:
+            self.svc_vars["service"].set(f"Error al consultar: {exc}")
+
+        self.svc_vars["admin"].set("Administrador" if is_admin() else "Usuario estándar (se pedirá UAC)")
+
+        try:
+            protection = protection_status()
+            if protection.get("hardened"):
+                self.svc_vars["acl"].set("Aplicadas en datos, cuarentena, reportes y logs")
+            else:
+                applied = sum(1 for ok in protection.get("dirs", {}).values() if ok)
+                total = len(protection.get("dirs", {}))
+                self.svc_vars["acl"].set(f"Pendientes ({applied}/{total} carpetas)")
+        except Exception as exc:
+            self.svc_vars["acl"].set(f"Error: {exc}")
+
+        agent = read_agent_status()
+        if agent.get("available"):
+            data = agent.get("data", {})
+            fresh = agent.get("fresh")
+            running = bool(data.get("running"))
+            pid = data.get("pid", "?")
+            if running and fresh:
+                self.svc_vars["agent"].set(f"En ejecución (PID {pid})")
+            elif running:
+                self.svc_vars["agent"].set(f"Sin heartbeat reciente (PID {pid})")
+            else:
+                self.svc_vars["agent"].set("Detenido")
+            components = data.get("components", {})
+            names = {
+                "live_protection": "Protección en vivo",
+                "canary": "Canarios",
+                "process_monitor": "Monitor de procesos",
+            }
+            active = [names.get(k, k) for k, ok in components.items() if ok]
+            self.svc_vars["components"].set(", ".join(active) if active else "Ninguno")
+            stats = data.get("stats", {})
+            self.svc_vars["stats"].set(
+                f"{data.get('signatures', 0)} firmas / "
+                f"{stats.get('detections', 0)} detecciones / "
+                f"{stats.get('quarantined', 0)} en cuarentena"
+            )
+            heartbeat = data.get("heartbeat", "")
+            uptime = int(data.get("uptime_seconds", 0))
+            self.svc_vars["heartbeat"].set(
+                f"{heartbeat} (activo {uptime // 3600}h {(uptime % 3600) // 60}m)"
+            )
+            errors = data.get("errors") or []
+            self.svc_vars["errors"].set(
+                "; ".join(errors[-2:])[:160] if errors else "Sin errores"
+            )
+        else:
+            self.svc_vars["agent"].set("Sin datos (servicio detenido)")
+            self.svc_vars["components"].set("—")
+            self.svc_vars["stats"].set(f"{len(self.signature_store)} firmas (interfaz)")
+            self.svc_vars["heartbeat"].set("—")
+            self.svc_vars["errors"].set("—")
+
+    def _elevate_action(self, extra_args, description):
+        """Relanza la app con UAC para una acción administrativa."""
+        try:
+            accepted = elevate_self(extra_args)
+        except Exception as exc:
+            accepted = False
+            self.log(f"[x] {description}: {exc}")
+            self._service_result(f"{description}: error al elevar ({exc})")
+            return
+        if accepted:
+            self.log(f"[i] {description}: UAC solicitado")
+            self._service_result(
+                f"{description}: aceptá el aviso de UAC. El estado se actualiza en unos segundos."
+            )
+            self.after(7000, self.refresh_service_view)
+        else:
+            self.log(f"[x] {description}: cancelado o UAC rechazado")
+            self._service_result(f"{description}: cancelado o UAC rechazado.")
+
+    def install_agent_service(self):
+        ask_confirm(
+            self,
+            "Instalar servicio",
+            "Se registrará KILLVirusAgent para que el agente arranque con Windows "
+            "aunque la ventana esté cerrada. Requiere permisos de administrador (UAC).",
+            lambda ok: ok and self._elevate_action(
+                ["--install-service"], "Instalar servicio"
+            ),
+        )
+
+    def uninstall_agent_service(self):
+        ask_confirm(
+            self,
+            "Desinstalar servicio",
+            "Se detendrá y eliminará el servicio KILLVirusAgent. La interfaz seguirá funcionando.",
+            lambda ok: ok and self._elevate_action(
+                ["--uninstall-service"], "Desinstalar servicio"
+            ),
+        )
+
+    def start_agent_service(self):
+        self._elevate_action(["--start-service"], "Iniciar servicio")
+
+    def stop_agent_service(self):
+        ask_confirm(
+            self,
+            "Detener servicio",
+            "El agente dejará de proteger en segundo plano hasta que lo inicies de nuevo.",
+            lambda ok: ok and self._elevate_action(["--stop-service"], "Detener servicio"),
+        )
+
+    def apply_autoprotection(self):
+        ask_confirm(
+            self,
+            "Aplicar autoprotección",
+            "Se quitará la herencia de permisos en data, cuarentena, reportes y logs, "
+            "dejando acceso solo a tu usuario, SYSTEM y Administradores. "
+            "Se generará además el manifiesto de integridad. Requiere UAC.",
+            lambda ok: ok and self._elevate_action(["--harden"], "Aplicar autoprotección"),
+        )
+
+    def generate_integrity_manifest(self):
+        def worker():
+            try:
+                manifest = write_manifest()
+                lines = [
+                    f"Manifiesto de integridad generado: {len(manifest.get('files', {}))} archivos"
+                ]
+                ok = True
+            except Exception as exc:
+                lines = [f"Error generando manifiesto: {exc}"]
+                ok = False
+            self.after(0, lambda: self._on_integrity_result(ok, lines))
+
+        self._service_result("Generando manifiesto de integridad...")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def verify_app_integrity(self):
+        def worker():
+            try:
+                if not os.path.isfile(INTEGRITY_FILE):
+                    manifest = write_manifest()
+                    lines = [
+                        "No había manifiesto; se generó uno nuevo con "
+                        f"{len(manifest.get('files', {}))} archivos."
+                    ]
+                    ok = True
+                else:
+                    problems = verify_manifest()
+                    if problems:
+                        lines = problems
+                        ok = False
+                    else:
+                        lines = ["Integridad OK: ningún archivo crítico cambió."]
+                        ok = True
+            except Exception as exc:
+                lines = [f"Error verificando integridad: {exc}"]
+                ok = False
+            self.after(0, lambda: self._on_integrity_result(ok, lines))
+
+        self._service_result("Verificando integridad del código y del ejecutable...")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_integrity_result(self, ok, lines):
+        for line in lines:
+            self.log(f"[{'✓' if ok else '!'}] {line}")
+            self._service_result(line)
+        show_alert(
+            self,
+            "Integridad OK" if ok else "Integridad alterada",
+            "\n".join(lines[:8]),
+            alert_type="success" if ok else "warning",
+        )
 
     def _switch_view(self, view_name, nav_button):
         for name, frame in self.views.items():
@@ -1562,10 +1863,16 @@ class MainWindow(ctk.CTk):
     def quit_app(self):
         if self.tray:
             self.tray.stop()
-        if self.live_handler:
-            self.live_handler.stop()
-            self.live_handler = None
-        if self.observer and self.is_monitoring:
-            self.observer.stop()
-            self.observer.join()
+        if self.canary_manager:
+            try:
+                self.canary_manager.stop_monitoring()
+            except Exception:
+                pass
+        if self.live_protection:
+            try:
+                self.live_protection.stop()
+            except Exception:
+                pass
+            self.live_protection = None
+        self.is_monitoring = False
         self.after(0, self.destroy)

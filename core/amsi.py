@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
-from typing import Optional
 
 # Constantes AMSI
 AMSI_RESULT_CLEAN = 0

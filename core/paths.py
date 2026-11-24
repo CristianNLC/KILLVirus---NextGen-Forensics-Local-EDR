@@ -39,8 +39,16 @@ BASE_DIR = _app_base_dir()
 # Datos de solo lectura que trae el instalador (o el repo en desarrollo).
 BUNDLE_DATA_DIR = os.path.join(BASE_DIR, "data")
 
+# Permite que el servicio de Windows y la interfaz compartan exactamente el
+# mismo directorio de datos (el servicio corre como SYSTEM y, por defecto,
+# LOCALAPPDATA apuntaría al perfil de SYSTEM). El instalador o el modo
+# --service pasan la ruta real en esta variable.
+_DATA_OVERRIDE = os.environ.get("KILLVIRUS_DATA_DIR", "").strip()
+
 # Directorio escribible de ejecución.
-if IS_FROZEN:
+if _DATA_OVERRIDE:
+    RUNTIME_DIR = os.path.abspath(_DATA_OVERRIDE)
+elif IS_FROZEN:
     RUNTIME_DIR = _user_data_dir()
 else:
     RUNTIME_DIR = BASE_DIR
@@ -55,6 +63,11 @@ SIGNATURES_FILE = os.path.join(DATA_DIR, "signatures.json")
 SIGNATURES_DB = os.path.join(DATA_DIR, "signatures.db")
 RULES_FILE = os.path.join(DATA_DIR, "rules.yar")
 EXCLUSIONS_FILE = os.path.join(DATA_DIR, "exclusions.json")
+
+# Estado/heartbeat del agente headless (servicio de Windows).
+AGENT_STATUS_FILE = os.path.join(DATA_DIR, "agent_status.json")
+# Huellas de integridad de los archivos críticos de la aplicación.
+INTEGRITY_FILE = os.path.join(DATA_DIR, "integrity.json")
 
 # Archivos que se copian desde el bundle si faltan en el directorio escribible.
 SEED_FILES = ("signatures.json", "rules.yar")

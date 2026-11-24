@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
-import tempfile
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from core.amsi import AMSI
-from core.paths import is_inside_runtime_dir, QUARANTINE_DIR
+from core.paths import is_inside_runtime_dir
 from core.quarantine import isolate_file
 from core.reporter import generate_html_report
 from core.scanner import TARGET_EXTENSIONS, calculate_sha256
-from core.signatures import DictStore, SignatureStore, SignatureEntry
+from core.signatures import DictStore, SignatureStore
 from core.updater import update_signatures_from_cloud
 from core.virustotal import check_virustotal_hash
 from core.memory import scan_running_processes

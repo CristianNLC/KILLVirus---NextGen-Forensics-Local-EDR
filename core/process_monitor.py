@@ -14,7 +14,7 @@ from typing import Callable, Optional
 
 import psutil
 
-from core.signatures import SignatureStore, SignatureEntry
+from core.signatures import SignatureStore
 from core.scanner import calculate_sha256
 
 

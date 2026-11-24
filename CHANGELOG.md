@@ -4,6 +4,39 @@ Todas las versiones relevantes de KILLVirus. Formato basado en
 [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y
 [Versionado Semántico](https://semver.org/lang/es/).
 
+## [2.2.0] - 2026-11-23
+
+### Añadido
+- `core/signatures/store.py`: `SqliteStore` con WAL, `busy_timeout` y lock
+  interno; la interfaz y el servicio pueden compartir la misma base sin
+  errores de hilo ni de bloqueo.
+- `core/agent.py`: agente de protección headless (watcher, canarios, monitor de
+  procesos) con cola de cuarentena, heartbeat en `data/agent_status.json` y
+  watchdog que reinicia componentes caídos.
+- `core/winservice.py`: host de servicio de Windows con `ctypes`
+  (`StartServiceCtrlDispatcherW`), sin pywin32 ni dependencias externas.
+- `core/service_control.py`: instalación/desinstalación/estado vía `sc.exe`,
+  recuperación automática del servicio y elevación por UAC.
+- `core/autoprotect.py`: ACLs endurecidas con `icacls` (SIDs, sin herencia) y
+  manifiesto de integridad SHA-256 del código y del ejecutable.
+- `app.pyw`: modos `--agent`, `--service`, `--install-service`,
+  `--uninstall-service`, `--start-service`, `--stop-service`,
+  `--service-status`, `--harden`, `--integrity-write` e `--integrity-verify`.
+- Vista **Servicio y Autoprotección** con estado del SCM, heartbeat del agente,
+  botones de instalación, ACLs e integridad.
+- `tests/` para agente, servicio, autoprotección, canarios, AMSI, cuarentena y
+  store (73 pruebas).
+- `scripts/install_service.ps1` y `scripts/uninstall_service.ps1`.
+- Instalador Inno Setup: tarea opcional de servicio y desinstalación limpia.
+
+### Corregido
+- `quit_app()` fallaba con `AttributeError` al cerrar la ventana (referencias
+  obsoletas a `live_handler`/`observer`).
+- Layout de la barra lateral: etiquetas y botones se superponían en las mismas
+  filas; ahora hay un espaciador real y filas únicas.
+- Vista de canarios: dos filas con `weight=1` que descuadraban las tablas.
+- Carpetas de canarios duplicadas (`Pictures` dos veces).
+
 ## [2.1.0] - 2026-11-20
 
 ### Añadido

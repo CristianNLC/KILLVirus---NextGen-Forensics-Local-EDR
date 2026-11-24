@@ -14,16 +14,7 @@ import os
 import threading
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Callable, Optional
-
-try:
-    import win32api  # type: ignore
-    import win32con  # type: ignore
-    HAS_WIN32 = True
-except Exception:  # pragma: no cover - pywin32 opcional
-    HAS_WIN32 = False
-
-from core.paths import is_inside_runtime_dir, QUARANTINE_DIR, REPORTS_DIR
+from typing import Callable, Optional
 
 
 # Archivos canario: nombres que ransomware suele intentar cifrar primero.
@@ -78,7 +69,7 @@ class CanaryManager:
         for env in ("USERPROFILE", "APPDATA", "LOCALAPPDATA"):
             base = os.environ.get(env, "")
             if base:
-                for sub in ("Documents", "Desktop", "Pictures", "Pictures"):
+                for sub in ("Documents", "Desktop", "Pictures"):
                     p = os.path.join(base, sub)
                     if os.path.isdir(p):
                         dirs.append(p)
@@ -156,6 +147,11 @@ class CanaryManager:
             self._thread.join(timeout=5)
             self._thread = None
 
+    @property
+    def is_monitoring(self) -> bool:
+        """True si el hilo de polling de canarios está activo."""
+        return bool(self._thread and self._thread.is_alive())
+
     def _poll_loop(self, interval: float) -> None:
         while not self._stop.is_set():
             try:
@@ -202,18 +198,14 @@ class CanaryManager:
             except Exception:
                 pass
 
-    def _find_recent_writer(self, path: str) -> Optional[dict[str, Any]]:
-        """Intenta encontrar el proceso que modifico el archivo (mejor esfuerzo)."""
-        if not HAS_WIN32:
-            return None
-        try:
-            import win32file  # type: ignore
-            # Nota: obtener el escritor real requiere filtrar el diario de USN
-            # o usar ETW, que esta fuera de alcance aquí. Devolvemos None
-            # y dejamos que el usuario investigue manualmente.
-            return None
-        except Exception:
-            return None
+    def _find_recent_writer(self, path: str) -> Optional[dict]:
+        """Punto de extensión para identificar al escritor (USN/ETW).
+
+        Obtener el proceso real requiere el diario USN o ETW, fuera del alcance
+        de este módulo. Se devuelve None para que la UI lo indique como
+        desconocido en lugar de inventar un culpable.
+        """
+        return None
 
     def export_alerts(self, alerts: list[CanaryAlert], out_path: str) -> None:
         with open(out_path, "w", encoding="utf-8") as f:

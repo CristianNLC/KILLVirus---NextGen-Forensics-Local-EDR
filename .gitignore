@@ -30,3 +30,7 @@ data/config.json
 data/license.json
 data/exclusions.json
 data/*.db
+data/*.db-wal
+data/*.db-shm
+data/agent_status.json
+data/integrity.json

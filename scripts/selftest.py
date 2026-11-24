@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -22,7 +23,6 @@ from core.signatures import (
     DictStore,
     SignatureEntry,
     create_signature_store,
-    SqliteStore,
 )
 from core.scan_engine import scan_file
 from core.updater import parse_iocs, update_signatures_from_cloud
@@ -184,7 +184,6 @@ for leftover in (qp, qp + ".meta" if qp else None):
         os.remove(leftover)
 
 # --- firmas en SQLite ---
-from core.paths import SIGNATURES_DB, SIGNATURES_FILE
 
 tmpdb = os.path.join(tmpdir, "test_signatures.db")
 
@@ -220,6 +219,50 @@ check("sqlite: migración conserva nombre",
 ss3.add(SignatureEntry(hash="g" * 64, malware_name="Extra"))
 check("sqlite: no duplica al reabrir", len(ss3) == 2)
 ss3.close()
+
+# --- agente headless (sin Tk) ---
+from core.agent import AgentOptions, ProtectionAgent
+
+agent_dir = os.path.join(tmpdir, "agent")
+os.makedirs(agent_dir, exist_ok=True)
+agent_status = os.path.join(agent_dir, "status.json")
+agent_options = AgentOptions(
+    watch_folders=[agent_dir],
+    canary_dirs=[agent_dir],
+    enable_process_monitor=False,
+    canary_interval=0.2,
+    heartbeat_interval=0.2,
+    watchdog_interval=30.0,
+    status_file=agent_status,
+)
+agent = ProtectionAgent(agent_options, store=DictStore())
+agent.start()
+time.sleep(0.7)
+agent_state = agent.status()
+check("agente: arranca", agent.is_running)
+check("agente: heartbeat escrito", os.path.isfile(agent_status))
+check("agente: proteccion en vivo activa",
+      agent_state["components"]["live_protection"])
+check("agente: canarios activos", agent_state["components"]["canary"])
+agent.stop()
+check("agente: se detiene", not agent.is_running)
+
+# --- servicio de Windows y autoproteccion (sin tocar el SCM real) ---
+from core.autoprotect import build_icacls_command, compute_manifest
+from core.service_control import build_bin_path, service_status
+
+check("servicio: binPath incluye --service", "--service" in build_bin_path())
+check("servicio: binPath incluye --data-dir", "--data-dir" in build_bin_path())
+missing = service_status("KILLVirusTestInexistente123")
+check("servicio: consulta inexistente no falla", missing["installed"] is False)
+acl_cmd = build_icacls_command(tmpdir)
+check("acl: desactiva herencia", "/inheritance:r" in acl_cmd)
+check("acl: concede a SYSTEM y Administradores",
+      any("*S-1-5-18" in part for part in acl_cmd)
+      and any("*S-1-5-32-544" in part for part in acl_cmd))
+manifest = compute_manifest(PROJECT_ROOT)
+check("integridad: manifiesto con archivos", len(manifest["files"]) > 10,
+      f"({len(manifest['files'])} archivos)")
 
 print()
 print("RESULTADO:", "TODO OK" if not failures else f"FALLOS: {failures}")

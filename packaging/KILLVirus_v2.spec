@@ -6,7 +6,17 @@ from PyInstaller.utils.hooks import collect_all
 # administración que no deben salir del entorno de desarrollo.
 datas = [('assets', 'assets')]
 binaries = []
-hiddenimports = []
+hiddenimports = [
+    # Importados de forma diferida dentro de app.pyw (modo servicio/CLI).
+    'core.agent',
+    'core.winservice',
+    'core.service_control',
+    'core.autoprotect',
+    'services.scan_service',
+    # watchdog carga el observer de Windows dinamicamente.
+    'watchdog.observers.read_directory_changes',
+    'watchdog.observers.winapi',
+]
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
