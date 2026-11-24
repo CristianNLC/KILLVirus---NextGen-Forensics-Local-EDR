@@ -543,7 +543,8 @@ class MainWindow(ctk.CTk):
         ).grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
         ctk.CTkLabel(
             v,
-            text="Revisa qué se ejecuta al prender la PC (Registro Run/RunOnce, carpetas Startup y procesos de consola activos).",
+            text="Revisa qué se ejecuta al prender la PC (Registro Run/RunOnce, carpetas Startup, Servicios y Tareas Programadas). "
+                 "Filas en rojo: el archivo no existe o la ruta es inusual.",
             text_color=COLOR_TEXT_SECONDARY,
             font=ctk.CTkFont(family=FONT_FAMILY, size=12),
         ).grid(row=1, column=0, padx=20, pady=(0, 10), sticky="w")
@@ -578,16 +579,18 @@ class MainWindow(ctk.CTk):
 
         self.tree_startup = ttk.Treeview(
             tree_frame,
-            columns=("source", "name", "command", "path", "exists"),
+            columns=("type", "source", "name", "command", "path", "exists", "risk"),
             show="headings",
-            height=8,
+            height=10,
         )
         for col, txt, w in [
-            ("source", "Origen", 120),
-            ("name", "Nombre", 150),
-            ("command", "Comando", 300),
-            ("path", "Ruta", 250),
-            ("exists", "Existe", 60),
+            ("type", "Tipo", 100),
+            ("source", "Origen", 140),
+            ("name", "Nombre", 160),
+            ("command", "Comando", 320),
+            ("path", "Ruta", 260),
+            ("exists", "Existe", 55),
+            ("risk", "Riesgo", 70),
         ]:
             self.tree_startup.heading(col, text=txt)
             self.tree_startup.column(col, width=w, stretch=(col == "command"))
@@ -675,16 +678,51 @@ class MainWindow(ctk.CTk):
             self.log(f"[x] Error listando inicio: {e}")
             return
         for e in entries:
+            risk = self._startup_risk(e)
             self.tree_startup.insert(
                 "", "end",
                 values=(
-                    f"{e['hive']} / {e['source']}" if e['hive'] else e['source'],
+                    e.get("type", ""),
+                    f"{e['hive']} / {e['source']}" if e.get('hive') else e['source'],
                     e['name'],
                     e['command'],
-                    e['path'] or "",
-                    "Sí" if e['exists'] else "No",
+                    e.get('path') or "",
+                    "Sí" if e.get('exists') else "No",
+                    risk,
                 ),
+                tags=("risk",) if risk == "Alto" else (),
             )
+        self.tree_startup.tag_configure("risk", foreground=COLOR_DANGER)
+
+    def _startup_risk(self, entry: dict) -> str:
+        """Calcula nivel de riesgo de una entrada de inicio."""
+        path = entry.get("path") or ""
+        command = entry.get("command", "").lower()
+        name = entry.get("name", "").lower()
+        source = entry.get("source", "").lower()
+
+        # Si el archivo no existe, entrada rota o posible malware ya borrado
+        if not entry.get("exists") and path:
+            return "Alto"
+
+        # Rutas inusuales (temp, appdata local temp, programdata)
+        suspicious_keywords = [
+            "temp", "appdata\\local\\temp", "programdata",
+            "powershell", "wscript", "cscript", "cmd.exe /c",
+        ]
+        lower_command = command
+        lower_path = path.lower()
+        for kw in suspicious_keywords:
+            if kw in lower_command or kw in lower_path:
+                return "Alto"
+
+        # Tareas programadas con triggers de inicio/logon son medio riesgo
+        if entry.get("type") == "Tarea":
+            trigger = (entry.get("trigger") or "").lower()
+            if any(t in trigger for t in ("inicio", "logon", "boot", "startup")):
+                return "Medio"
+
+        return "Bajo"
 
     def refresh_console_table(self):
         self.tree_console.delete(*self.tree_console.get_children())
@@ -720,10 +758,47 @@ class MainWindow(ctk.CTk):
             show_alert(self, "Atención", "Seleccione una entrada de inicio.", alert_type="warning")
             return
         item = self.tree_startup.item(sel[0])
-        command = item["values"][2]
-        path = item["values"][3]
-        name = item["values"][1]
-        self._confirm_terminate(0, name, self.refresh_startup_table)
+        entry_type = item["values"][0]
+        name = item["values"][2]
+        command = item["values"][3]
+        path = item["values"][4]
+
+        if entry_type == "Servicio":
+            show_alert(
+                self, "No disponible",
+                "Los servicios de Windows no se pueden terminar desde aquí. "
+                "Usá 'services.msc' para detenerlos.",
+                alert_type="info",
+            )
+            return
+        if entry_type == "Tarea":
+            show_alert(
+                self, "No disponible",
+                "Las tareas programadas no se pueden eliminar desde aquí. "
+                "Usá el Programador de Tareas de Windows.",
+                alert_type="info",
+            )
+            return
+
+        # Para entradas de registro/carpeta: intentar terminar el proceso si está corriendo
+        import psutil
+        found = False
+        for proc in psutil.process_iter(['pid', 'name', 'exe']):
+            try:
+                exe = proc.info.get('exe') or ""
+                if exe and os.path.normcase(exe) == os.path.normcase(path):
+                    self._confirm_terminate(proc.info['pid'], name, self.refresh_startup_table)
+                    found = True
+                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        if not found:
+            show_alert(
+                self, "Información",
+                f"No se encontró el proceso '{name}' en ejecución. "
+                "La entrada de inicio seguirá activa al próximo reinicio hasta que la deshabilites.",
+                alert_type="info",
+            )
 
     def terminate_selected_console(self):
         sel = self.tree_console.selection()
