@@ -52,6 +52,7 @@ LOG_DIR = os.path.join(RUNTIME_DIR, "logs")
 
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 SIGNATURES_FILE = os.path.join(DATA_DIR, "signatures.json")
+SIGNATURES_DB = os.path.join(DATA_DIR, "signatures.db")
 RULES_FILE = os.path.join(DATA_DIR, "rules.yar")
 EXCLUSIONS_FILE = os.path.join(DATA_DIR, "exclusions.json")
 

@@ -11,6 +11,8 @@ Aquí la firma es un modificador de confianza:
   * Regla YARA            -> se reporta siempre.
   * Heurística/PE         -> si el binario tiene firma válida, se descarta
                              como falso positivo; si no, se reporta.
+
+`store` es cualquier objeto que implemente `core.signatures.SignatureStore`.
 """
 
 import os
@@ -23,6 +25,7 @@ from core.scanner import (
     analyze_yara,
     check_authenticode,
 )
+from core.signatures import SignatureStore, SignatureEntry
 
 SEV_SIGNATURE = 3
 SEV_YARA = 2
@@ -41,10 +44,10 @@ class Detection:
     signature_message: str = ""
 
 
-def scan_file(filepath, signatures):
+def scan_file(filepath, store: SignatureStore):
     """Analiza un archivo y devuelve Detection o None.
 
-    `signatures` es el diccionario hash -> metadatos.
+    `store` debe implementar `lookup(hash) -> SignatureEntry | None`.
     """
     if not os.path.isfile(filepath):
         return None
@@ -53,14 +56,15 @@ def scan_file(filepath, signatures):
     detection = None
 
     # 1. Firma de hash (máxima confianza, no se descarta por Authenticode)
-    if file_hash and file_hash in signatures:
-        meta = signatures[file_hash] or {}
-        detection = Detection(
-            name=meta.get("malware_name", "Malware"),
-            reason="Firma SHA-256",
-            severity=SEV_SIGNATURE,
-            sha256=file_hash,
-        )
+    if file_hash:
+        entry = store.lookup(file_hash)
+        if entry is not None:
+            detection = Detection(
+                name=entry.malware_name,
+                reason="Firma SHA-256",
+                severity=SEV_SIGNATURE,
+                sha256=file_hash,
+            )
 
     # 2. Reglas YARA (alta confianza, tampoco se descarta)
     if detection is None:

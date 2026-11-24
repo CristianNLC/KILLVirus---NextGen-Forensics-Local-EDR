@@ -29,11 +29,12 @@ from core import __app_name__, __version__
 from core.exclusions import is_excluded, parse_exclusions
 from core.scanner import TARGET_EXTENSIONS, calculate_sha256, check_authenticode
 from core.scan_engine import scan_file
+from core.signatures import create_signature_store
 from core.yara_scanner import HAS_YARA, UNAVAILABLE_REASON
 from core.logging_setup import install_excepthook, setup_logging
 from core.paths import (
     init_app, is_inside_runtime_dir,
-    CONFIG_FILE, SIGNATURES_FILE, QUARANTINE_DIR,
+    CONFIG_FILE, SIGNATURES_FILE, SIGNATURES_DB, QUARANTINE_DIR,
 )
 from core.quarantine import isolate_file
 from core.memory import scan_running_processes
@@ -43,6 +44,9 @@ from core.updater import update_signatures_from_cloud
 from core.reporter import generate_html_report
 from core.tray import SystemTrayManager
 from core.context_menu import register_context_menu, unregister_context_menu
+from core.monitor.watcher import LiveProtectionManager
+from core.startup_audit import list_startup_entries, list_console_processes, terminate_process
+from services.scan_service import ScanService
 
 logger = logging.getLogger(__name__)
 
@@ -191,11 +195,19 @@ class MainWindow(ctk.CTk):
                 pass
 
         self.signatures = self.load_signatures()
+        self.signature_store = create_signature_store(
+            SIGNATURES_DB,
+            json_path=SIGNATURES_FILE,
+            use_sqlite=True,
+        )
         self.vt_api_key = self.config.get("vt_api_key", "")
         self.exclusions = set(self.config.get("exclusions", []))
 
-        self.observer = None
-        self.live_handler = None
+        # Servicio de lógica de negocio (desacoplado de la UI).
+        self.scan_service = ScanService(self.signature_store, self.config)
+
+        # Protección en tiempo real (watcher + observador desacoplados).
+        self.live_protection = None
         self.is_monitoring = False
         self.tray = None
 
@@ -225,7 +237,7 @@ class MainWindow(ctk.CTk):
         # ---------------- BARRA LATERAL (SIDEBAR) ----------------
         self.sidebar = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=COLOR_SIDEBAR)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(6, weight=1)
+        self.sidebar.grid_rowconfigure(9, weight=1)
 
         brand_lbl = ctk.CTkLabel(
             self.sidebar, text="⚔️ KILLVirus",
@@ -238,6 +250,7 @@ class MainWindow(ctk.CTk):
         self.btn_nav_tools = self._create_sidebar_btn("Motores del Sistema", 2, self.show_tools_view)
         self.btn_nav_quar = self._create_sidebar_btn("Cuarentena", 3, self.show_quarantine_view)
         self.btn_nav_config = self._create_sidebar_btn("Configuración", 4, self.show_config_view)
+        self.btn_nav_startup = self._create_sidebar_btn("Inicio del Sistema", 5, self.show_startup_view)
 
         # Botón de Ayuda (?)
         self.btn_help = ctk.CTkButton(
@@ -247,11 +260,11 @@ class MainWindow(ctk.CTk):
             text_color=COLOR_TEXT_PRIMARY, anchor="w",
             command=self.open_help_modal
         )
-        self.btn_help.grid(row=5, column=0, padx=12, pady=(12, 4), sticky="ew")
+        self.btn_help.grid(row=6, column=0, padx=12, pady=(12, 4), sticky="ew")
 
         # Selector de Tema (Modo Oscuro / Claro)
         theme_box = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        theme_box.grid(row=7, column=0, padx=16, pady=(0, 10), sticky="ew")
+        theme_box.grid(row=8, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         lbl_theme = ctk.CTkLabel(
             theme_box, text="Tema:",
@@ -275,10 +288,10 @@ class MainWindow(ctk.CTk):
             fg_color="#eab308", text_color="#18181b", hover_color="#ca8a04",
             command=self.open_donation_modal
         )
-        self.btn_donate.grid(row=8, column=0, padx=16, pady=(0, 10), sticky="ew")
+        self.btn_donate.grid(row=9, column=0, padx=16, pady=(0, 10), sticky="ew")
 
         self.lbl_sig_count = ctk.CTkLabel(
-            self.sidebar, text=f"Firmas CTI: {len(self.signatures)}",
+            self.sidebar, text=f"Firmas CTI: {len(self.signature_store)}",
             font=ctk.CTkFont(family=FONT_FAMILY, size=11), text_color=COLOR_TEXT_MUTED
         )
         self.lbl_sig_count.grid(row=9, column=0, padx=20, pady=(0, 4), sticky="w")
@@ -302,6 +315,7 @@ class MainWindow(ctk.CTk):
         self._init_tools_view()
         self._init_quarantine_view()
         self._init_config_view()
+        self._init_startup_view()
 
         self.show_scanner_view()
 
@@ -316,7 +330,7 @@ class MainWindow(ctk.CTk):
         return btn
 
     def _set_active_tab(self, active_btn):
-        for btn in [self.btn_nav_scanner, self.btn_nav_tools, self.btn_nav_quar, self.btn_nav_config]:
+        for btn in [self.btn_nav_scanner, self.btn_nav_tools, self.btn_nav_quar, self.btn_nav_config, self.btn_nav_startup]:
             btn.configure(fg_color=COLOR_ACCENT if btn == active_btn else "transparent")
             btn.configure(text_color="#ffffff" if btn == active_btn else COLOR_TEXT_PRIMARY)
 
@@ -516,6 +530,124 @@ class MainWindow(ctk.CTk):
 
         self.views["config"] = v
 
+    # ================= VISTA 5: INICIO DEL SISTEMA =================
+    def _init_startup_view(self):
+        v = ctk.CTkFrame(self.container, fg_color="transparent")
+        v.grid_columnconfigure(0, weight=1)
+        v.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            v, text="Inicio del Sistema",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
+        ctk.CTkLabel(
+            v,
+            text="Revisa qué se ejecuta al prender la PC (Registro Run/RunOnce, carpetas Startup y procesos de consola activos).",
+            text_color=COLOR_TEXT_SECONDARY,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=12),
+        ).grid(row=1, column=0, padx=20, pady=(0, 10), sticky="w")
+
+        # --- Sección: Entradas de inicio ---
+        card_start = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
+        card_start.grid(row=2, column=0, padx=20, pady=(0, 10), sticky="ew")
+        card_start.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            card_start, text="Entradas de Auto-Inicio",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).grid(row=0, column=0, padx=16, pady=(12, 4), sticky="w")
+
+        btn_start_box = ctk.CTkFrame(card_start, fg_color="transparent")
+        btn_start_box.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        ctk.CTkButton(
+            btn_start_box, text="Refrescar", width=100,
+            command=self.refresh_startup_table,
+        ).pack(side="left")
+        ctk.CTkButton(
+            btn_start_box, text="Terminar Seleccionado", width=140, fg_color=COLOR_DANGER,
+            hover_color=COLOR_DANGER_HOVER,
+            command=self.terminate_selected_startup,
+        ).pack(side="left", padx=(10, 0))
+
+        tree_frame = ctk.CTkFrame(card_start, fg_color="transparent")
+        tree_frame.grid(row=2, column=0, padx=16, pady=(0, 12), sticky="nsew")
+        tree_frame.grid_columnconfigure(0, weight=1)
+        tree_frame.grid_rowconfigure(0, weight=1)
+
+        self.tree_startup = ttk.Treeview(
+            tree_frame,
+            columns=("source", "name", "command", "path", "exists"),
+            show="headings",
+            height=8,
+        )
+        for col, txt, w in [
+            ("source", "Origen", 120),
+            ("name", "Nombre", 150),
+            ("command", "Comando", 300),
+            ("path", "Ruta", 250),
+            ("exists", "Existe", 60),
+        ]:
+            self.tree_startup.heading(col, text=txt)
+            self.tree_startup.column(col, width=w, stretch=(col == "command"))
+        self.tree_startup.grid(row=0, column=0, sticky="nsew")
+
+        scroll_start = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree_startup.yview)
+        scroll_start.grid(row=0, column=1, sticky="ns")
+        self.tree_startup.configure(yscrollcommand=scroll_start.set)
+
+        # --- Sección: Procesos de consola ---
+        card_console = ctk.CTkFrame(v, fg_color=COLOR_CARD, corner_radius=12)
+        card_console.grid(row=3, column=0, padx=20, pady=(0, 20), sticky="nsew")
+        card_console.grid_columnconfigure(0, weight=1)
+        v.grid_rowconfigure(3, weight=1)
+
+        ctk.CTkLabel(
+            card_console, text="Procesos de Consola Activos",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
+            text_color=COLOR_TEXT_PRIMARY,
+        ).grid(row=0, column=0, padx=16, pady=(12, 4), sticky="w")
+
+        btn_console_box = ctk.CTkFrame(card_console, fg_color="transparent")
+        btn_console_box.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        ctk.CTkButton(
+            btn_console_box, text="Refrescar", width=100,
+            command=self.refresh_console_table,
+        ).pack(side="left")
+        ctk.CTkButton(
+            btn_console_box, text="Terminar Seleccionado", width=140, fg_color=COLOR_DANGER,
+            hover_color=COLOR_DANGER_HOVER,
+            command=self.terminate_selected_console,
+        ).pack(side="left", padx=(10, 0))
+
+        tree_console_frame = ctk.CTkFrame(card_console, fg_color="transparent")
+        tree_console_frame.grid(row=2, column=0, padx=16, pady=(0, 12), sticky="nsew")
+        tree_console_frame.grid_columnconfigure(0, weight=1)
+        tree_console_frame.grid_rowconfigure(0, weight=1)
+
+        self.tree_console = ttk.Treeview(
+            tree_console_frame,
+            columns=("pid", "name", "exe", "cmdline"),
+            show="headings",
+            height=8,
+        )
+        for col, txt, w in [
+            ("pid", "PID", 60),
+            ("name", "Nombre", 120),
+            ("exe", "Ejecutable", 250),
+            ("cmdline", "Línea de Comandos", 400),
+        ]:
+            self.tree_console.heading(col, text=txt)
+            self.tree_console.column(col, width=w, stretch=(col == "cmdline"))
+        self.tree_console.grid(row=0, column=0, sticky="nsew")
+
+        scroll_console = ttk.Scrollbar(tree_console_frame, orient="vertical", command=self.tree_console.yview)
+        scroll_console.grid(row=0, column=1, sticky="ns")
+        self.tree_console.configure(yscrollcommand=scroll_console.set)
+
+        self.views["startup"] = v
+
     # ================= NAVEGACIÓN Y EVENTOS =================
     def show_scanner_view(self):
         self._switch_view("scanner", self.btn_nav_scanner)
@@ -529,6 +661,79 @@ class MainWindow(ctk.CTk):
 
     def show_config_view(self):
         self._switch_view("config", self.btn_nav_config)
+
+    def show_startup_view(self):
+        self._switch_view("startup", self.btn_nav_startup)
+        self.refresh_startup_table()
+        self.refresh_console_table()
+
+    def refresh_startup_table(self):
+        self.tree_startup.delete(*self.tree_startup.get_children())
+        try:
+            entries = list_startup_entries()
+        except Exception as e:
+            self.log(f"[x] Error listando inicio: {e}")
+            return
+        for e in entries:
+            self.tree_startup.insert(
+                "", "end",
+                values=(
+                    f"{e['hive']} / {e['source']}" if e['hive'] else e['source'],
+                    e['name'],
+                    e['command'],
+                    e['path'] or "",
+                    "Sí" if e['exists'] else "No",
+                ),
+            )
+
+    def refresh_console_table(self):
+        self.tree_console.delete(*self.tree_console.get_children())
+        try:
+            procs = list_console_processes()
+        except Exception as e:
+            self.log(f"[x] Error listando consolas: {e}")
+            return
+        for p in procs:
+            self.tree_console.insert(
+                "", "end",
+                values=(p['pid'], p['name'], p['exe'] or "", p['cmdline'] or ""),
+            )
+
+    def _confirm_terminate(self, pid, name, callback):
+        def _do(confirmed):
+            if confirmed:
+                ok = terminate_process(pid)
+                if ok:
+                    self.log(f"[✓] Proceso terminado: {name} (PID {pid})")
+                else:
+                    self.log(f"[x] No se pudo terminar: {name} (PID {pid})")
+                callback()
+        ask_confirm(
+            self, "Terminar Proceso",
+            f"¿Está seguro de terminar el proceso {name} (PID {pid})?",
+            callback=_do,
+        )
+
+    def terminate_selected_startup(self):
+        sel = self.tree_startup.selection()
+        if not sel:
+            show_alert(self, "Atención", "Seleccione una entrada de inicio.", alert_type="warning")
+            return
+        item = self.tree_startup.item(sel[0])
+        command = item["values"][2]
+        path = item["values"][3]
+        name = item["values"][1]
+        self._confirm_terminate(0, name, self.refresh_startup_table)
+
+    def terminate_selected_console(self):
+        sel = self.tree_console.selection()
+        if not sel:
+            show_alert(self, "Atención", "Seleccione un proceso de consola.", alert_type="warning")
+            return
+        item = self.tree_console.item(sel[0])
+        pid = item["values"][0]
+        name = item["values"][1]
+        self._confirm_terminate(pid, name, self.refresh_console_table)
 
     def _switch_view(self, view_name, nav_button):
         for name, frame in self.views.items():
@@ -693,50 +898,15 @@ class MainWindow(ctk.CTk):
         self.log(f"--- Escaneando directorio: {target_dir} ---")
         self.set_status("Contando archivos para análisis...")
 
-        # 1. Contar total de archivos elegibles
-        target_files = []
-        for root, _, files in os.walk(target_dir):
-            if self.is_path_excluded(root):
-                continue
-            for file in files:
-                filepath = os.path.join(root, file)
-                if self.is_path_excluded(filepath):
-                    continue
-                if is_inside_runtime_dir(filepath):
-                    continue
-                ext = os.path.splitext(file)[1].lower()
-                if ext in TARGET_EXTENSIONS:
-                    target_files.append(filepath)
+        def _on_progress(scanned, total, current_file):
+            self.after(0, lambda c=scanned, t=total, fp=current_file: self.progress_card.update_progress(c, t, fp))
 
-        total_files = len(target_files)
-        self.after(0, lambda: self.progress_card.start("Analizando archivos...", total_files))
+        self.after(0, lambda: self.progress_card.start("Analizando archivos...", 0))
         self.set_status("Analizando contenido...")
 
-        scanned = 0
-        threats = []
-
-        for idx, filepath in enumerate(target_files, 1):
-            file = os.path.basename(filepath)
-            scanned += 1
-
-            self.after(0, lambda c=scanned, t=total_files, fp=filepath: self.progress_card.update_progress(c, t, fp))
-
-            detection = scan_file(filepath, self.signatures)
-            if detection:
-                f_hash = detection.sha256 or calculate_sha256(filepath)
-                self.log(f"[!] DETECCIÓN: {file} | {detection.reason}: {detection.name}")
-                qp = isolate_file(
-                    filepath,
-                    reason=f"{detection.reason}: {detection.name}",
-                    sha256=f_hash,
-                )
-                if qp:
-                    self.log(f"    [+] Aislado en cuarentena: {os.path.basename(qp)}")
-                threats.append({
-                    "file": file, "path": filepath, "hash": f_hash or "N/A",
-                    "reason": f"{detection.reason}: {detection.name}",
-                    "quarantined": qp is not None
-                })
+        result = self.scan_service.scan_folder(target_dir, progress_cb=_on_progress)
+        scanned = result["scanned"]
+        threats = result["threats"]
 
         self.log("-" * 50)
         self.log(f"Finalizado: {scanned} inspeccionados, {len(threats)} neutralizados.")
@@ -745,7 +915,7 @@ class MainWindow(ctk.CTk):
         self.after(0, lambda: self.btn_scan.configure(state="normal"))
 
         try:
-            rep = generate_html_report(target_dir, scanned, threats)
+            rep = self.scan_service.generate_report(target_dir, scanned, threats)
             self.log(f"[✓] Reporte generado: {os.path.basename(rep)}")
         except Exception as e:
             self.log(f"[x] Error en reporte: {e}")
@@ -771,29 +941,33 @@ class MainWindow(ctk.CTk):
                 show_alert(self, "Atención", "Seleccione un directorio válido para supervisar.", alert_type="warning")
                 return
 
-            handler = LiveProtectionHandler(self)
-            self.observer = Observer()
-            self.observer.schedule(handler, folder, recursive=True)
-            self.observer.start()
-            handler.start()
-            self.live_handler = handler
+            self.live_protection = LiveProtectionManager(
+                self.signature_store,
+                on_detect=self._on_live_detect,
+            )
+            self.live_protection.start(folder)
 
             self.is_monitoring = True
             self.btn_live.configure(text="Protección en Tiempo Real: Activa", fg_color=COLOR_SUCCESS, hover_color=COLOR_SUCCESS_HOVER)
             self.set_status(f"Supervisando: {folder}")
             self.log(f"\n[>>>] SUPERVISIÓN ACTIVA: {folder}")
         else:
-            if self.observer:
-                self.observer.stop()
-                self.observer.join()
-                self.observer = None
-            if self.live_handler:
-                self.live_handler.stop()
-                self.live_handler = None
+            if self.live_protection:
+                self.live_protection.stop()
+                self.live_protection = None
             self.is_monitoring = False
             self.btn_live.configure(text="Protección en Tiempo Real: Inactiva", fg_color=COLOR_DANGER, hover_color=COLOR_DANGER_HOVER)
             self.set_status("Supervisión detenida.")
             self.log("[<<<] Supervisión en tiempo real pausada.")
+
+    def _on_live_detect(self, filepath, detection):
+        """Callback del watcher: se ejecuta en el hilo trabajador de protección."""
+        filename = os.path.basename(filepath)
+        self.log(f"\n[!] ALERTA EN VIVO: {filename} | {detection.reason}: {detection.name}")
+        qp = self.scan_service.quarantine_file(filepath, detection)
+        if qp:
+            self.log(f"    [+] Aislado en cuarentena: {os.path.basename(qp)}")
+        return detection
 
     def scan_single_file_live(self, filepath):
         if not os.path.isfile(filepath) or self.is_path_excluded(filepath):
@@ -801,17 +975,13 @@ class MainWindow(ctk.CTk):
         if is_inside_runtime_dir(filepath):
             return None
 
-        detection = scan_file(filepath, self.signatures)
+        detection = self.scan_service.scan_file_live(filepath)
         if detection is None:
             return None
 
         filename = os.path.basename(filepath)
         self.log(f"\n[!] ALERTA EN VIVO: {filename} | {detection.reason}: {detection.name}")
-        qp = isolate_file(
-            filepath,
-            reason=f"{detection.reason}: {detection.name}",
-            sha256=detection.sha256,
-        )
+        qp = self.scan_service.quarantine_file(filepath, detection)
         if qp:
             self.log(f"    [+] Aislado en cuarentena: {os.path.basename(qp)}")
         return detection
@@ -836,7 +1006,7 @@ class MainWindow(ctk.CTk):
 
         self.after(0, lambda: self.progress_card.start("Escaneando procesos activos en RAM...", 100))
 
-        inspected, threats = scan_running_processes(self.signatures, progress_callback=_on_ram_progress)
+        inspected, threats = self.scan_service.scan_processes(progress_callback=_on_ram_progress)
 
         for t in threats:
             self.log(f"[!] PROCESO TERMINADO: {t['name']} (PID: {t['pid']}) -> {t['malware']}")
@@ -870,7 +1040,7 @@ class MainWindow(ctk.CTk):
         self.set_status("Auditando entradas del registro...")
         self.after(0, lambda: self.progress_card.start("Auditando registro de auto-inicio...", 100))
 
-        total, flagged = audit_registry(self.signatures)
+        total, flagged = self.scan_service.audit_persistence()
 
         verified = []
         for item in flagged:
@@ -911,8 +1081,7 @@ class MainWindow(ctk.CTk):
         self.log(f"[*] Consultando VirusTotal: {os.path.basename(filepath)}...")
         self.after(0, lambda: self.progress_card.start("Consultando VirusTotal API...", 1))
 
-        f_hash = calculate_sha256(filepath)
-        code, stats, results = check_virustotal_hash(f_hash, self.vt_api_key)
+        code, stats, results = self.scan_service.check_virustotal(filepath, self.vt_api_key)
 
         if code == 200:
             mal = stats.get("malicious", 0)
@@ -940,15 +1109,12 @@ class MainWindow(ctk.CTk):
         self.log("[*] Sincronizando firmas desde ThreatFox...")
         self.after(0, lambda: self.progress_card.start("Sincronizando firmas desde ThreatFox...", 100))
 
-        ok, res, new_sigs = update_signatures_from_cloud(
-            self.signatures,
-            auth_key=self.config.get("threatfox_auth_key", ""),
-        )
+        ok, res, new_sigs = self.scan_service.update_signatures()
         if ok:
-            self.signatures = new_sigs
-            self.after(0, lambda: self.lbl_sig_count.configure(text=f"Firmas CTI: {len(self.signatures)}"))
-            self.log(f"[✓] Actualización completada: +{res} firmas añadidas.")
-            self.after(0, lambda: show_alert(self, "Actualización Exitosa", f"Se incorporaron {res} nuevas firmas de malware.", alert_type="success"))
+            count, added = self.scan_service.apply_updated_signatures(new_sigs)
+            self.after(0, lambda: self.lbl_sig_count.configure(text=f"Firmas CTI: {count}"))
+            self.log(f"[✓] Actualización completada: +{added} firmas añadidas.")
+            self.after(0, lambda: show_alert(self, "Actualización Exitosa", f"Se incorporaron {added} nuevas firmas de malware.", alert_type="success"))
         else:
             self.log(f"[!] Error de sincronización: {res}")
             self.after(0, lambda: show_alert(
@@ -957,7 +1123,7 @@ class MainWindow(ctk.CTk):
                 alert_type="warning"
             ))
 
-        self.after(0, lambda: self.progress_card.set_complete("Actualización de firmas completada", len(self.signatures)))
+        self.after(0, lambda: self.progress_card.set_complete("Actualización de firmas completada", len(self.signature_store)))
 
     def manage_context_menu(self):
         def _on_confirm(ok_choice):

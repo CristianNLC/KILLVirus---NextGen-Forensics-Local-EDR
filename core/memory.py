@@ -1,8 +1,15 @@
 import os
 import psutil
-from core.scanner import calculate_sha256
 
-def scan_running_processes(signatures, progress_callback=None):
+from core.scanner import calculate_sha256
+from core.signatures import SignatureStore
+
+
+def scan_running_processes(store: SignatureStore, progress_callback=None):
+    """Inspecciona procesos en ejecución y termina los que coincidan con firmas.
+
+    `store` debe implementar `lookup(hash) -> SignatureEntry | None`.
+    """
     inspected = 0
     threats_found = []
 
@@ -29,9 +36,14 @@ def scan_running_processes(signatures, progress_callback=None):
             inspected += 1
             f_hash = calculate_sha256(exe_path)
 
-            if f_hash and f_hash in signatures:
-                malware_name = signatures[f_hash].get("malware_name", "Amenaza")
-                threats_found.append({"pid": pid, "name": p_name, "path": exe_path, "malware": malware_name})
+            entry = store.lookup(f_hash) if f_hash else None
+            if entry is not None:
+                threats_found.append({
+                    "pid": pid,
+                    "name": p_name,
+                    "path": exe_path,
+                    "malware": entry.malware_name,
+                })
                 try:
                     proc.kill()
                 except Exception:

