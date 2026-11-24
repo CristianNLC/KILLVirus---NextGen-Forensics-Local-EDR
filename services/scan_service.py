@@ -8,15 +8,22 @@ import tempfile
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from core.amsi import AMSI
 from core.paths import is_inside_runtime_dir, QUARANTINE_DIR
 from core.quarantine import isolate_file
 from core.reporter import generate_html_report
-from core.scanner import calculate_sha256
+from core.scanner import TARGET_EXTENSIONS, calculate_sha256
 from core.signatures import DictStore, SignatureStore, SignatureEntry
 from core.updater import update_signatures_from_cloud
 from core.virustotal import check_virustotal_hash
 from core.memory import scan_running_processes
 from core.persistence import audit_registry
+
+# Instancia global de AMSI (se inicializa una sola vez)
+_amsi = AMSI()
+
+# Extensiones de script que se envían a AMSI
+SCRIPT_EXTENSIONS = {".ps1", ".vbs", ".js", ".jse", ".vbe", ".wsf", ".wsh"}
 
 
 @dataclass
@@ -67,8 +74,6 @@ class ScanService:
                 if is_inside_runtime_dir(filepath):
                     continue
                 ext = os.path.splitext(file)[1].lower()
-                # Usamos las mismas extensiones objetivo del escáner
-                from core.scanner import TARGET_EXTENSIONS
                 if ext in TARGET_EXTENSIONS:
                     target_files.append(filepath)
 
@@ -135,4 +140,31 @@ class ScanService:
 # Import local para evitar import circular con core.scanner (que importa de core.yara_scanner etc.)
 def scan_file_engine(filepath, store: SignatureStore):
     from core.scan_engine import scan_file as _scan_file
-    return _scan_file(filepath, store)
+    from core.scan_engine import Detection, SEV_YARA
+
+    detection = _scan_file(filepath, store)
+    if detection is not None:
+        return detection
+
+    # Si no hay detección por firmas/YARA/heurística, probar AMSI en scripts
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in SCRIPT_EXTENSIONS and _amsi.available:
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except OSError:
+            return None
+
+        if not content.strip():
+            return None
+
+        es_malicioso, msg = _amsi.scan_string(content, os.path.basename(filepath))
+        if es_malicioso:
+            return Detection(
+                name="AMSI.Detected",
+                reason=f"AMSI ({msg})",
+                severity=SEV_YARA,
+                sha256=calculate_sha256(filepath),
+            )
+
+    return None
