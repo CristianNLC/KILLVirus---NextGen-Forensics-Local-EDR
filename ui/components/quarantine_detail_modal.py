@@ -61,7 +61,16 @@ class QuarantineDetailModal(ctk.CTkToplevel):
         raw_date = meta_data.get("date", "Desconocida")
         date_formatted = format_quarantine_date(raw_date)
         reason = meta_data.get("reason", "Detención preventiva en cuarentena")
-        f_hash = meta_data.get("sha256", "No registrado")
+        f_hash = meta_data.get("sha256") or "No registrado"
+        encrypted = meta_data.get("encrypted")
+        if encrypted is None:
+            from core.quarantine import is_encrypted_file
+            encrypted = is_encrypted_file(quarantine_filepath)
+        protection = (
+            "Cifrado con DPAPI (no ejecutable en reposo)"
+            if encrypted
+            else "Sin cifrar (archivo heredado de una versión anterior)"
+        )
 
         # Encabezado
         header = ctk.CTkFrame(self, fg_color=COLOR_CARD, corner_radius=0, height=54)
@@ -86,6 +95,7 @@ class QuarantineDetailModal(ctk.CTkToplevel):
             ("Motivo de Detección:", reason),
             ("Fecha de Aislamiento:", date_formatted),
             ("Tamaño en Disco:", size_str),
+            ("Protección:", protection),
             ("Hash SHA-256:", f_hash)
         ]
 
@@ -98,8 +108,8 @@ class QuarantineDetailModal(ctk.CTkToplevel):
             lbl_key.grid(row=idx, column=0, padx=(0, 10), pady=6, sticky="ne")
 
             txt_val = ctk.CTkTextbox(
-                body, height=28 if idx != 1 and idx != 5 else 48,
-                font=ctk.CTkFont(family="Consolas" if idx in (1, 5) else FONT_FAMILY, size=11),
+                body, height=28 if idx not in (1, len(fields) - 1) else 48,
+                font=ctk.CTkFont(family="Consolas" if idx in (1, len(fields) - 1) else FONT_FAMILY, size=11),
                 fg_color=COLOR_CARD, text_color=COLOR_TEXT_SECONDARY
             )
             txt_val.grid(row=idx, column=1, pady=4, sticky="ew")

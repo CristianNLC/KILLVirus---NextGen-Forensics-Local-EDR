@@ -43,6 +43,25 @@ class CanaryAlert:
     process_name: Optional[str] = None
     process_pid: Optional[int] = None
     process_exe: Optional[str] = None
+    process_evidence: Optional[str] = None  # "handle" | "io"
+
+
+# Umbrales para la atribución por I/O. Se descartan procesos que escribieron
+# demasiado (backups, indexadores) o nada en el intervalo.
+IO_MAX_WRITE_BYTES = 8 * 1024 * 1024
+
+
+def _norm_path(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _is_system_exe(exe: Optional[str]) -> bool:
+    """Descarta binarios del sistema para reducir falsos positivos por I/O."""
+    if not exe:
+        return False
+    low = exe.lower()
+    windir = os.environ.get("SystemRoot", r"C:\Windows").lower()
+    return low.startswith(windir) or "\\program files" in low
 
 
 class CanaryManager:
@@ -60,6 +79,9 @@ class CanaryManager:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        # Contadores de I/O de la pasada anterior: permiten atribuir la
+        # escritura que ocurrió entre dos sondeos.
+        self._io_snapshot: dict[int, dict] = {}
 
     # --- ciclo de vida -------------------------------------------------------
 
@@ -161,10 +183,11 @@ class CanaryManager:
             self._stop.wait(interval)
 
     def _scan_once(self) -> None:
+        current_io = self._read_io_counters()
         for p in list(self.canary_paths):
             if not os.path.exists(p):
                 # Puede haber sido renombrado: buscar archivos canary con nombre similar
-                self._alert(p, "deleted")
+                self._alert(p, "deleted", current_io)
                 continue
             current = self._file_hash(p)
             with self._lock:
@@ -173,11 +196,12 @@ class CanaryManager:
                 with self._lock:
                     self._hashes[p] = current
             elif current != expected:
-                self._alert(p, "modified")
+                self._alert(p, "modified", current_io)
                 with self._lock:
                     self._hashes[p] = current
+        self._io_snapshot = current_io
 
-    def _alert(self, path: str, event: str) -> None:
+    def _alert(self, path: str, event: str, io_now: Optional[dict] = None) -> None:
         name = os.path.basename(path)
         alert = CanaryAlert(
             timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -186,11 +210,12 @@ class CanaryManager:
             event=event,
         )
         # Intentar identificar el proceso responsable (mejor esfuerzo)
-        proc_info = self._find_recent_writer(path)
+        proc_info = self._find_recent_writer(path, io_now)
         if proc_info:
             alert.process_name = proc_info.get("name")
             alert.process_pid = proc_info.get("pid")
             alert.process_exe = proc_info.get("exe")
+            alert.process_evidence = proc_info.get("evidence")
 
         if self.on_alert:
             try:
@@ -198,14 +223,91 @@ class CanaryManager:
             except Exception:
                 pass
 
-    def _find_recent_writer(self, path: str) -> Optional[dict]:
-        """Punto de extensión para identificar al escritor (USN/ETW).
+    def _find_recent_writer(
+        self, path: str, io_now: Optional[dict] = None
+    ) -> Optional[dict]:
+        """Atribuye (mejor esfuerzo) el proceso que tocó el canario.
 
-        Obtener el proceso real requiere el diario USN o ETW, fuera del alcance
-        de este módulo. Se devuelve None para que la UI lo indique como
-        desconocido en lugar de inventar un culpable.
+        Dos estrategias, de mayor a menor fiabilidad:
+          1. Handle abierto sobre el canario (`Process.open_files()`).
+          2. Delta de I/O de escritura entre dos sondeos, solo si hay un único
+             candidato plausible.
+        Nunca inventa un culpable: si hay ambigüedad devuelve None.
         """
+        handles = self._processes_with_open_file(path)
+        if handles:
+            return {**handles[0], "evidence": "handle"}
+
+        previous = self._io_snapshot
+        if not previous:
+            return None
+        current = io_now if io_now is not None else self._read_io_counters()
+        own_pid = os.getpid()
+        candidates: list[dict] = []
+        for pid, info in current.items():
+            before = previous.get(pid)
+            if not before or pid == own_pid:
+                continue
+            delta_bytes = info.get("write_bytes", 0) - before.get("write_bytes", 0)
+            delta_count = info.get("write_count", 0) - before.get("write_count", 0)
+            if delta_count <= 0 or delta_bytes <= 0:
+                continue
+            if delta_bytes > IO_MAX_WRITE_BYTES:
+                continue
+            if _is_system_exe(info.get("exe")):
+                continue
+            candidates.append({**info, "pid": pid})
+
+        if len(candidates) == 1:
+            return {**candidates[0], "evidence": "io"}
         return None
+
+    @staticmethod
+    def _read_io_counters() -> dict[int, dict]:
+        """Foto de los contadores de I/O por proceso (vacía si no hay psutil)."""
+        snapshot: dict[int, dict] = {}
+        try:
+            import psutil
+        except Exception:
+            return snapshot
+        for proc in psutil.process_iter(["pid", "name", "exe"]):
+            try:
+                counters = proc.io_counters()
+                snapshot[proc.info["pid"]] = {
+                    "name": proc.info.get("name") or "",
+                    "exe": proc.info.get("exe") or "",
+                    "write_bytes": counters.write_bytes,
+                    "write_count": counters.write_count,
+                }
+            except Exception:
+                # AccesDenied/NoSuchProcess/Zombie: el proceso no es candidato.
+                continue
+        return snapshot
+
+    @staticmethod
+    def _processes_with_open_file(path: str) -> list[dict]:
+        """Procesos que mantienen abierto exactamente `path`."""
+        target = _norm_path(path)
+        found: list[dict] = []
+        try:
+            import psutil
+        except Exception:
+            return found
+        for proc in psutil.process_iter(["pid", "name", "exe"]):
+            try:
+                for handle in proc.open_files():
+                    if _norm_path(handle.path) == target:
+                        found.append(
+                            {
+                                "name": proc.info.get("name") or "",
+                                "exe": proc.info.get("exe") or "",
+                                "pid": proc.info["pid"],
+                            }
+                        )
+                        break
+            except Exception:
+                continue
+        return found
 
     def export_alerts(self, alerts: list[CanaryAlert], out_path: str) -> None:
         with open(out_path, "w", encoding="utf-8") as f:

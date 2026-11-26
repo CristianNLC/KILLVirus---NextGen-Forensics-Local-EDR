@@ -3,7 +3,6 @@ import sys
 import json
 import time
 import queue
-import shutil
 import logging
 import threading
 import webbrowser
@@ -35,6 +34,7 @@ from core.paths import (
     CONFIG_FILE, SIGNATURES_FILE, SIGNATURES_DB, QUARANTINE_DIR,
 )
 from core.persistence import extract_binary_path
+from core.quarantine import is_encrypted_file, restore_file
 from core.tray import SystemTrayManager
 from core.context_menu import register_context_menu, unregister_context_menu
 from core.monitor.watcher import LiveProtectionManager
@@ -946,6 +946,12 @@ class MainWindow(ctk.CTk):
         self.tree_canary_alerts.delete(*self.tree_canary_alerts.get_children())
         for a in self.canary_alerts:
             proc = a.process_name or a.process_exe or "desconocido"
+            if a.process_pid:
+                proc += f" (PID {a.process_pid})"
+            if a.process_evidence == "handle":
+                proc += " [handle abierto]"
+            elif a.process_evidence == "io":
+                proc += " [I/O de escritura]"
             self.tree_canary_alerts.insert(
                 "", "end",
                 values=(a.timestamp, a.canary_name, a.event, proc),
@@ -1729,7 +1735,8 @@ class MainWindow(ctk.CTk):
 
                 # Formato de fecha legible DD/MM/YYYY HH:MM:SS
                 formatted_date = format_quarantine_date(date_str)
-                self.tree_quar.insert("", "end", iid=file, values=(file, sz, formatted_date))
+                label = f"🔒 {file}" if is_encrypted_file(p) else file
+                self.tree_quar.insert("", "end", iid=file, values=(label, sz, formatted_date))
 
     def select_all_quarantine(self):
         children = self.tree_quar.get_children()
@@ -1769,9 +1776,7 @@ class MainWindow(ctk.CTk):
 
             if dest:
                 try:
-                    shutil.move(q_path, dest)
-                    if os.path.exists(meta_p):
-                        os.remove(meta_p)
+                    restore_file(q_path, dest)
                     restored_count += 1
                 except Exception as e:
                     show_alert(self, "Error al restaurar", f"No se pudo restaurar {item_file}: {e}", alert_type="error")

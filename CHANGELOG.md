@@ -4,6 +4,41 @@ Todas las versiones relevantes de KILLVirus. Formato basado en
 [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y
 [Versionado Semántico](https://semver.org/lang/es/).
 
+## [2.3.0] - 2026-11-26
+
+### Añadido
+- **Cuarentena cifrada (DPAPI):** el contenido aislado se guarda cifrado con
+  `CryptProtectData` en ámbito de máquina, así que la interfaz (usuario) y el
+  servicio (SYSTEM) pueden restaurarlo. El archivo en cuarentena ya no es
+  ejecutable ni copiable directamente; los aislamientos antiguos en claro se
+  siguen restaurando por compatibilidad.
+- **Atribución del escritor de canarios:** al modificarse un canario se busca
+  primero un proceso con el archivo abierto (`open_files`) y, si no lo hay, un
+  único candidato por delta de I/O de escritura. Si hay ambigüedad no se culpa a
+  nadie y la UI lo muestra como desconocido. La evidencia (`handle` / `I/O`) se
+  muestra junto al proceso.
+- `scripts/build_release.ps1`: build reproducible con Python 3.13, comprobación
+  de dependencias, tamaño y SHA-256 del ejecutable.
+- `scripts/sign_build.ps1`: firma Authenticode con `signtool` (almacén, `.pfx`
+  o certificado autofirmado de pruebas) y verificación posterior.
+- Specs de PyInstaller anclados a la raíz del proyecto: el build funciona desde
+  cualquier directorio y detecta el entrypoint correcto.
+- `scripts/selftest.py`: verifica cifrado, metadatos y restauración de la
+  cuarentena.
+
+### Cambiado
+- La vista de cuarentena marca los elementos cifrados con 🔒 y el detalle
+  muestra el estado de protección.
+- Versión 2.3.0.
+
+### Corregido
+- **Autoprotección (grave):** `icacls /T` aplicaba el permiso heredable
+  `(OI)(CI)F` también a los archivos; al quitar la herencia, los archivos
+  existentes quedaban con una DACL vacía (ilegibles, incluida
+  `signatures.db`). Ahora se hace en dos pasadas: control total explícito sobre
+  archivos y carpetas, y permisos heredables solo en las carpetas. Hay un test
+  que verifica que los archivos siguen legibles tras endurecer.
+
 ## [2.2.0] - 2026-11-23
 
 ### Añadido

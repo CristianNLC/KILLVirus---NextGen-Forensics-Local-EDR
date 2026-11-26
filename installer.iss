@@ -1,8 +1,8 @@
-; Script de Inno Setup para KILLVirus v2.0
+; Script de Inno Setup para KILLVirus v2.3
 [Setup]
 AppId={{E1B92C34-89C1-4D52-B42E-89C41C8F9A22}
 AppName=KILLVirus
-AppVersion=2.2.0
+AppVersion=2.3.0
 AppPublisher=KILLVirus Security
 AppPublisherURL=https://github.com/
 DefaultDirName={autopf}\KILLVirus

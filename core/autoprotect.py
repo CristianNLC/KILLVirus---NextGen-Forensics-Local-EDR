@@ -90,20 +90,61 @@ def default_protected_dirs() -> list[str]:
 
 
 def build_icacls_command(path: str, user: Optional[str] = None) -> list[str]:
-    """Comando icacls idempotente: sin herencia y solo 3 principales."""
+    """Primera pasada: quita la herencia y da control total a cada objeto.
+
+    Se concede `(F)` sin `(OI)(CI)` a propósito: `icacls /T` aplica el mismo
+    permiso a archivos y carpetas, y un permiso heredable sobre un archivo es
+    inválido (icacls lo ignora y, tras quitar la herencia, deja el archivo con
+    una DACL vacía). Los permisos heredables se aplican por carpeta en la
+    segunda pasada.
+    """
     principal = user or current_sid()
     return [
         "icacls",
         path,
         "/inheritance:r",
         "/grant:r",
-        f"{principal}:(OI)(CI)F",
-        f"{SID_SYSTEM}:(OI)(CI)F",
-        f"{SID_ADMINISTRATORS}:(OI)(CI)F",
+        f"{principal}:F",
+        f"{SID_SYSTEM}:F",
+        f"{SID_ADMINISTRATORS}:F",
         "/T",
         "/C",
         "/Q",
     ]
+
+
+def build_inherit_command(path: str, user: Optional[str] = None) -> list[str]:
+    """Segunda pasada: ACEs heredables en una carpeta para archivos futuros."""
+    principal = user or current_sid()
+    return [
+        "icacls",
+        path,
+        "/grant:r",
+        f"{principal}:(OI)(CI)F",
+        f"{SID_SYSTEM}:(OI)(CI)F",
+        f"{SID_ADMINISTRATORS}:(OI)(CI)F",
+        "/C",
+        "/Q",
+    ]
+
+
+def build_reset_command(path: str) -> list[str]:
+    """Restaura la herencia antes de endurecer.
+
+    Repara instalaciones de 2.2.0 afectadas por el bug de `icacls /T`: los
+    archivos podían quedar con DACL vacía. `/reset` les devuelve los permisos
+    heredados de la carpeta antes de aplicar la ACL endurecida.
+    """
+    return ["icacls", path, "/reset", "/T", "/C", "/Q"]
+
+
+def _run_icacls(command: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        capture_output=True,
+        creationflags=_hidden_flags(),
+        timeout=_ICACLS_TIMEOUT,
+    )
 
 
 def harden_path(path: str, user: Optional[str] = None) -> dict:
@@ -111,14 +152,23 @@ def harden_path(path: str, user: Optional[str] = None) -> dict:
     if not os.path.isdir(path):
         return {"path": path, "ok": False, "output": "no existe"}
     try:
-        result = subprocess.run(
-            build_icacls_command(path, user),
-            capture_output=True,
-            creationflags=_hidden_flags(),
-            timeout=_ICACLS_TIMEOUT,
-        )
-        output = _decode((result.stdout or b"") + (result.stderr or b"")).strip()
-        return {"path": path, "ok": result.returncode == 0, "output": output}
+        # Reparación previa: no se comprueba el resultado para no impedir el
+        # endurecimiento si algún archivo pertenece a otro propietario.
+        _run_icacls(build_reset_command(path))
+        results = [_run_icacls(build_icacls_command(path, user))]
+        # Segunda pasada solo en carpetas: así los archivos nuevos heredan los
+        # permisos y los existentes ya tienen `(F)` de la primera pasada.
+        for root, _dirs, _files in os.walk(path):
+            results.append(_run_icacls(build_inherit_command(root, user)))
+        output = "\n".join(
+            _decode((item.stdout or b"") + (item.stderr or b"")).strip()
+            for item in results
+        ).strip()
+        return {
+            "path": path,
+            "ok": all(item.returncode == 0 for item in results),
+            "output": output,
+        }
     except Exception as exc:
         return {"path": path, "ok": False, "output": str(exc)}
 

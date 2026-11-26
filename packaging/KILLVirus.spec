@@ -1,10 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+
 from PyInstaller.utils.hooks import collect_all
+
+# Las rutas del spec se resuelven relativas a packaging/, no al cwd. Se ancla
+# todo a la raíz del proyecto para que el build funcione desde cualquier sitio.
+ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 
 # Solo assets: el código de core/ y ui/ ya se compila dentro del PYZ.
 # Empaquetarlo como "datas" exponía el código fuente y, con él, herramientas de
 # administración que no deben salir del entorno de desarrollo.
-datas = [('assets', 'assets')]
+datas = [(os.path.join(ROOT, "assets"), "assets")]
 binaries = []
 hiddenimports = [
     # Importados de forma diferida dentro de app.pyw (modo servicio/CLI).
@@ -22,8 +28,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['app.pyw'],
-    pathex=[],
+    [os.path.join(ROOT, "app.pyw")],
+    pathex=[ROOT],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
@@ -55,5 +61,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets/icon.ico'],
+    version=os.path.join(ROOT, 'packaging', 'version_info.txt'),
+    icon=[os.path.join(ROOT, 'assets', 'icon.ico')],
 )

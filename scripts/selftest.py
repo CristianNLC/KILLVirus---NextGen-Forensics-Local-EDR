@@ -161,8 +161,8 @@ handler._handle(os.path.join(tmpdir, "dos.ps1"), False)
 check("live: encola archivos distintos", handler._queue.qsize() == 2)
 handler.stop()
 
-# --- cuarentena: aislamiento y metadatos ---
-from core.quarantine import isolate_file
+# --- cuarentena: aislamiento, cifrado y restauración ---
+from core.quarantine import isolate_file, is_encrypted_file, restore_file
 
 victim = os.path.join(tmpdir, "victima.exe")
 with open(victim, "wb") as fh:
@@ -170,6 +170,8 @@ with open(victim, "wb") as fh:
 qp = isolate_file(victim, reason="Prueba: firma de test", sha256="f" * 64)
 check("cuarentena: aisla y devuelve ruta", qp is not None and os.path.isfile(qp))
 check("cuarentena: borra el original", not os.path.exists(victim))
+check("cuarentena: cifra el contenido (DPAPI)",
+      bool(qp) and is_encrypted_file(qp))
 
 meta = {}
 if qp and os.path.isfile(qp + ".meta"):
@@ -177,9 +179,19 @@ if qp and os.path.isfile(qp + ".meta"):
         meta = json.load(fh)
 check("cuarentena: guarda motivo y sha256",
       meta.get("reason") == "Prueba: firma de test" and meta.get("sha256") == "f" * 64)
+check("cuarentena: marca cifrado en metadatos", meta.get("encrypted") is True)
+
+restored = os.path.join(tmpdir, "restaurada.exe")
+try:
+    restore_file(qp, restored)
+    with open(restored, "rb") as fh:
+        roundtrip = fh.read()
+    check("cuarentena: restaura el contenido original", roundtrip == b"MZ benigno")
+except Exception as exc:
+    check("cuarentena: restaura el contenido original", False, str(exc))
 
 # Limpieza: no dejar basura en la cuarentena real.
-for leftover in (qp, qp + ".meta" if qp else None):
+for leftover in (qp, qp + ".meta" if qp else None, restored):
     if leftover and os.path.isfile(leftover):
         os.remove(leftover)
 
