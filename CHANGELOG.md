@@ -26,7 +26,8 @@ Todas las versiones relevantes de KILLVirus. Formato basado en
 - Instalador: incluye solo los datos semilla necesarios (`signatures.json` y
   `rules.yar`), detiene el servicio antes de actualizar (evita el bloqueo del
   `.exe`), abre la aplicación sin elevación y conserva la cuarentena y los
-  reportes del usuario al desinstalar.
+  reportes del usuario al desinstalar. También elimina los accesos
+  «KILLVirus PRO» que dejaban las versiones anteriores.
 - Specs de PyInstaller anclados a la raíz del proyecto: el build funciona desde
   cualquier directorio y detecta el entrypoint correcto.
 - `scripts/selftest.py`: verifica cifrado, metadatos y restauración de la

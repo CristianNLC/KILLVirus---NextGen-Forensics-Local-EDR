@@ -54,6 +54,12 @@ Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "SECURITY.md"; DestDir: "{app}"; Flags: ignoreversion
 
+[InstallDelete]
+; Restos de la extinta capa PRO: sus accesos apuntaban a este mismo ejecutable
+; y solo generaban duplicados confusos tras actualizar.
+Type: files; Name: "{group}\KILLVirus PRO.lnk"
+Type: files; Name: "{autodesktop}\KILLVirus PRO.lnk"
+
 [Icons]
 Name: "{group}\KILLVirus"; Filename: "{app}\KILLVirus_v2.exe"; IconFilename: "{app}\assets\icon.ico"
 Name: "{group}\Desinstalar KILLVirus"; Filename: "{uninstallexe}"
