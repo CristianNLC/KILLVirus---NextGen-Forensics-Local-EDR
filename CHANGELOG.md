@@ -21,6 +21,12 @@ Todas las versiones relevantes de KILLVirus. Formato basado en
   de dependencias, tamaño y SHA-256 del ejecutable.
 - `scripts/sign_build.ps1`: firma Authenticode con `signtool` (almacén, `.pfx`
   o certificado autofirmado de pruebas) y verificación posterior.
+- `scripts/build_installer.ps1`: compila el instalador con Inno Setup 6.3+ y
+  valida que la versión del ejecutable coincida con `installer.iss`.
+- Instalador: incluye solo los datos semilla necesarios (`signatures.json` y
+  `rules.yar`), detiene el servicio antes de actualizar (evita el bloqueo del
+  `.exe`), abre la aplicación sin elevación y conserva la cuarentena y los
+  reportes del usuario al desinstalar.
 - Specs de PyInstaller anclados a la raíz del proyecto: el build funciona desde
   cualquier directorio y detecta el entrypoint correcto.
 - `scripts/selftest.py`: verifica cifrado, metadatos y restauración de la

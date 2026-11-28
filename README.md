@@ -67,10 +67,22 @@ powershell -ExecutionPolicy Bypass -File scripts\sign_build.ps1 -Thumbprint <SHA
 powershell -ExecutionPolicy Bypass -File scripts\sign_build.ps1 -PfxPath cert.pfx -PfxPassword ***
 ```
 
-El instalador se genera con Inno Setup a partir de `installer.iss`. Firmá tanto
+El instalador se genera con **Inno Setup 6.3+** (probado con Inno Setup 7) a
+partir de `installer.iss`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1
+# Compilar y firmar el instalador con un certificado del almacén:
+powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1 -Sign -Thumbprint <SHA1>
+```
+
+El script verifica que la versión del `.exe` coincida con la del `.iss` y deja
+el resultado en `dist_installer\KILLVirus_v2_Setup.exe`. Firmá tanto
 `KILLVirus_v2.exe` como el `Setup.exe` final: sin sello de tiempo RFC3161 la
 firma caduca con el certificado. Al subir la versión, actualizá también
-`packaging/version_info.txt` (metadatos del `.exe`).
+`packaging/version_info.txt` (metadatos del `.exe`). Inno detecta una
+instalación previa y actualiza en el sitio; para forzar otra carpeta usá
+`/DIR="..."` al ejecutar el instalador.
 
 ### Autocomprobación
 
