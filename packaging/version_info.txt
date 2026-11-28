@@ -2,8 +2,8 @@
 # Mantener sincronizado con core/__init__.py, pyproject.toml e installer.iss.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 3, 0, 0),
-    prodvers=(2, 3, 0, 0),
+    filevers=(2, 3, 1, 0),
+    prodvers=(2, 3, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -21,12 +21,12 @@ VSVersionInfo(
             StringStruct(
               "FileDescription", "KILLVirus - NextGen Forensics & Local EDR"
             ),
-            StringStruct("FileVersion", "2.3.0"),
+            StringStruct("FileVersion", "2.3.1"),
             StringStruct("InternalName", "KILLVirus"),
             StringStruct("LegalCopyright", "MIT License"),
             StringStruct("OriginalFilename", "KILLVirus_v2.exe"),
             StringStruct("ProductName", "KILLVirus"),
-            StringStruct("ProductVersion", "2.3.0"),
+            StringStruct("ProductVersion", "2.3.1"),
           ],
         )
       ]

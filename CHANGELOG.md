@@ -4,6 +4,22 @@ Todas las versiones relevantes de KILLVirus. Formato basado en
 [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y
 [Versionado Semántico](https://semver.org/lang/es/).
 
+## [2.3.1] - 2026-11-27
+
+### Corregido
+- **Arranque del ejecutable empaquetado:** `core/amsi.py` usaba
+  `ctypes.wintypes.HRESULT`, que existe en Python 3.14 pero no en 3.13 (el
+  intérprete con el que se compila). El `.exe` fallaba al abrir la interfaz con
+  `AttributeError: module 'ctypes.wintypes' has no attribute 'HRESULT'`. Ahora
+  el tipo se define localmente y cualquier fallo de AMSI deja el módulo como
+  no disponible en vez de tumbar la aplicación.
+- El build ejecuta `KILLVirus_v2.exe --smoke-test`, que importa la interfaz
+  completa con el ejecutable final y aborta la compilación si no arranca.
+
+### Añadido
+- `--smoke-test`: importa UI, AMSI, SQLite y YARA sin abrir ventana; pensado
+  para CI y para `scripts/build_release.ps1`.
+
 ## [2.3.0] - 2026-11-26
 
 ### Añadido

@@ -1,12 +1,12 @@
-; Script de Inno Setup para KILLVirus 2.3.0
+; Script de Inno Setup para KILLVirus 2.3.1
 ; Requiere Inno Setup 6.3+ (probado con Inno Setup 7).
 ; Compilar con scripts\build_installer.ps1 (o ISCC.exe installer.iss).
 
 [Setup]
 AppId={{E1B92C34-89C1-4D52-B42E-89C41C8F9A22}
 AppName=KILLVirus
-AppVersion=2.3.0
-AppVerName=KILLVirus 2.3.0
+AppVersion=2.3.1
+AppVerName=KILLVirus 2.3.1
 AppPublisher=KILLVirus Security
 AppPublisherURL=https://github.com/CristianNLC/KILLVirus---NextGen-Forensics-Local-EDR
 AppSupportURL=https://github.com/CristianNLC/KILLVirus---NextGen-Forensics-Local-EDR/issues
@@ -28,9 +28,9 @@ CloseApplications=yes
 RestartApplications=no
 AllowNoIcons=yes
 SetupLogging=yes
-VersionInfoVersion=2.3.0.0
+VersionInfoVersion=2.3.1.0
 VersionInfoCompany=KILLVirus Security
-VersionInfoDescription=Instalador de KILLVirus 2.3.0
+VersionInfoDescription=Instalador de KILLVirus 2.3.1
 VersionInfoCopyright=MIT License
 
 [Languages]

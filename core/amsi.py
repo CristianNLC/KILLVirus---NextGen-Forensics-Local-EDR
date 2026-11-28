@@ -15,6 +15,11 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 
+# Python 3.13 no expone ``HRESULT`` en ``ctypes.wintypes`` (sí lo hace 3.14).
+# En Win32 es un LONG de 32 bits; definirlo aquí evita que el ejecutable
+# compilado con 3.13 falle al importar la interfaz.
+HRESULT = ctypes.c_long
+
 # Constantes AMSI
 AMSI_RESULT_CLEAN = 0
 AMSI_RESULT_NOT_DETECTED = 1
@@ -38,32 +43,40 @@ class AMSI:
         self._init()
 
     def _init(self) -> None:
+        # AMSI es opcional: si la DLL no existe, no exporta alguna función o
+        # cambia la firma, la app debe seguir funcionando sin él. Atrapar solo
+        # OSError dejaba pasar AttributeError y tumbaba toda la interfaz.
         try:
             self._amsi = ctypes.WinDLL("amsi.dll")
-        except OSError:
-            return
 
-        # AMSI_RESULT es un DWORD (32 bits sin signo)
-        self._amsi.AmsiInitialize.argtypes = [wintypes.LPWSTR, ctypes.POINTER(wintypes.HANDLE)]
-        self._amsi.AmsiInitialize.restype = wintypes.HRESULT
+            # AMSI_RESULT es un DWORD (32 bits sin signo)
+            self._amsi.AmsiInitialize.argtypes = [
+                wintypes.LPWSTR,
+                ctypes.POINTER(wintypes.HANDLE),
+            ]
+            self._amsi.AmsiInitialize.restype = HRESULT
 
-        self._amsi.AmsiScanString.argtypes = [
-            wintypes.HANDLE,
-            wintypes.LPWSTR,
-            wintypes.LPWSTR,
-            wintypes.LPWSTR,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        self._amsi.AmsiScanString.restype = wintypes.HRESULT
+            self._amsi.AmsiScanString.argtypes = [
+                wintypes.HANDLE,
+                wintypes.LPWSTR,
+                wintypes.LPWSTR,
+                wintypes.LPWSTR,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            self._amsi.AmsiScanString.restype = HRESULT
 
-        self._amsi.AmsiCloseSession.argtypes = [wintypes.HANDLE]
-        self._amsi.AmsiCloseSession.restype = None
+            self._amsi.AmsiCloseSession.argtypes = [wintypes.HANDLE]
+            self._amsi.AmsiCloseSession.restype = None
 
-        session = wintypes.HANDLE()
-        hr = self._amsi.AmsiInitialize("KILLVirus", ctypes.byref(session))
-        if hr == 0:  # S_OK
-            self._session = session
-            self.available = True
+            session = wintypes.HANDLE()
+            hr = self._amsi.AmsiInitialize("KILLVirus", ctypes.byref(session))
+            if hr == 0:  # S_OK
+                self._session = session
+                self.available = True
+        except Exception:
+            self._amsi = None
+            self._session = None
+            self.available = False
 
     def scan_string(self, content: str, content_name: str = "KILLVirus Scan") -> tuple[bool, str]:
         """

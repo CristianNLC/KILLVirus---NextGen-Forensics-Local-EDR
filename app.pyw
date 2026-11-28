@@ -8,7 +8,8 @@ Modos:
   * --uninstall-service       -> elimina el servicio (requiere admin/UAC);
   * --start-service / --stop-service / --service-status;
   * --harden                  -> aplica ACLs de autoprotección + manifiesto;
-  * --integrity-verify        -> comprueba el manifiesto de integridad.
+  * --integrity-verify        -> comprueba el manifiesto de integridad;
+  * --smoke-test              -> importa la interfaz y sale (verificación del build).
 """
 
 import atexit
@@ -231,6 +232,29 @@ def main():
         return _run_service_mode()
     if "--agent" in args:
         return _run_agent_mode()
+    if "--smoke-test" in args:
+        # Verificación del build: importa toda la interfaz (AMSI, SQLite,
+        # YARA, customtkinter...) sin abrir ventana. Detecta diferencias entre
+        # el Python de desarrollo y el de compilación (3.13).
+        try:
+            import ui.main_window  # noqa: F401
+        except Exception:
+            import traceback
+
+            try:
+                from core.paths import LOG_DIR
+
+                os.makedirs(LOG_DIR, exist_ok=True)
+                with open(
+                    os.path.join(LOG_DIR, "smoke_test_error.log"),
+                    "w",
+                    encoding="utf-8",
+                ) as handle:
+                    handle.write(traceback.format_exc())
+            except Exception:
+                pass
+            return 1
+        return 0
 
     setup_logging()
     install_excepthook()

@@ -6,7 +6,7 @@
 
 [project]
 name = "killvirus"
-version = "2.3.0"
+version = "2.3.1"
 description = "EDR local y toolkit forense para Windows, 100% offline"
 readme = "README.md"
 requires-python = ">=3.10"

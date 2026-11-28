@@ -97,6 +97,39 @@ if (-not (Test-Path $exe)) {
     throw "No se generó $exe"
 }
 
+# El .exe se compila con 3.13, pero el desarrollo suele usar 3.14. Un import
+# que funciona en 3.14 puede no existir en 3.13 (p. ej. wintypes.HRESULT), y
+# eso solo se ve al abrir la interfaz ya empaquetada. Este smoke test importa
+# la UI completa con el ejecutable final y falla el build si no arranca.
+Write-Host "Comprobando arranque de la interfaz empaquetada (--smoke-test)..."
+$smokeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("kv_smoke_" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $smokeDir | Out-Null
+$previousDataDir = $env:KILLVIRUS_DATA_DIR
+$env:KILLVIRUS_DATA_DIR = $smokeDir
+try {
+    $smoke = Start-Process -FilePath $exe -ArgumentList "--smoke-test" -PassThru
+    if (-not $smoke.WaitForExit(90000)) {
+        $smoke.Kill()
+        throw "El smoke test de la interfaz no terminó en 90 s."
+    }
+    if ($smoke.ExitCode -ne 0) {
+        $errorLog = Join-Path $smokeDir "logs\smoke_test_error.log"
+        if (Test-Path $errorLog) {
+            Write-Host "--- error de importación ---" -ForegroundColor Red
+            Get-Content $errorLog -Tail 40
+        }
+        throw "El .exe compilado falla al importar la interfaz (--smoke-test, código $($smoke.ExitCode))."
+    }
+} finally {
+    if ($null -eq $previousDataDir) {
+        Remove-Item Env:KILLVIRUS_DATA_DIR -ErrorAction SilentlyContinue
+    } else {
+        $env:KILLVIRUS_DATA_DIR = $previousDataDir
+    }
+    Remove-Item -Recurse -Force $smokeDir -ErrorAction SilentlyContinue
+}
+Write-Host "Smoke test de la interfaz: OK" -ForegroundColor Green
+
 $file = Get-Item $exe
 $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
 Write-Host ""
